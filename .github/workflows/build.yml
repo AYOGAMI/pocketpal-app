@@ -3,10 +3,21 @@ on: workflow_dispatch
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 170
     env:
-      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx5g -Dorg.gradle.daemon=false
     steps:
+      - name: Free disk space and add swap memory
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift /opt/hostedtoolcache/CodeQL || true
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 12G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=12288
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          df -h /
+          free -h
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -19,16 +30,16 @@ jobs:
         run: yarn install --frozen-lockfile || yarn install
       - name: Make a signing key
         run: keytool -genkeypair -v -keystore $HOME/pp.jks -alias pp -keyalg RSA -keysize 2048 -validity 10000 -storepass ppbuild123 -keypass ppbuild123 -dname "CN=PocketPal Build"
-      - name: Build the APK (phone chip only, so it is faster)
+      - name: Build the APK (phone chip only)
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleProdRelease -PreactNativeArchitectures=arm64-v8a \
+          ./gradlew assembleProdRelease --max-workers=3 -PreactNativeArchitectures=arm64-v8a \
             -Pandroid.injected.signing.store.file=$HOME/pp.jks \
             -Pandroid.injected.signing.store.password=ppbuild123 \
             -Pandroid.injected.signing.key.alias=pp \
             -Pandroid.injected.signing.key.password=ppbuild123 \
-          || ./gradlew assembleProdRelease -PreactNativeArchitectures=arm64-v8a
+          || ./gradlew assembleProdRelease --max-workers=2 -PreactNativeArchitectures=arm64-v8a
       - uses: actions/upload-artifact@v4
         with:
           name: app
