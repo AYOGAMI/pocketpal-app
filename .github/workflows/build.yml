@@ -1,0 +1,35 @@
+name: build-android
+on: workflow_dispatch
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install JS packages
+        run: yarn install --frozen-lockfile || yarn install
+      - name: Make a signing key
+        run: keytool -genkeypair -v -keystore $HOME/pp.jks -alias pp -keyalg RSA -keysize 2048 -validity 10000 -storepass ppbuild123 -keypass ppbuild123 -dname "CN=PocketPal Build"
+      - name: Build the APK (phone chip only, so it is faster)
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a \
+            -Pandroid.injected.signing.store.file=$HOME/pp.jks \
+            -Pandroid.injected.signing.store.password=ppbuild123 \
+            -Pandroid.injected.signing.key.alias=pp \
+            -Pandroid.injected.signing.key.password=ppbuild123 \
+          || ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: android/app/build/outputs/apk/**/*.apk
