@@ -23,12 +23,12 @@ jobs:
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a \
+          ./gradlew assembleProdRelease -PreactNativeArchitectures=arm64-v8a \
             -Pandroid.injected.signing.store.file=$HOME/pp.jks \
             -Pandroid.injected.signing.store.password=ppbuild123 \
             -Pandroid.injected.signing.key.alias=pp \
             -Pandroid.injected.signing.key.password=ppbuild123 \
-          || ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+          || ./gradlew assembleProdRelease -PreactNativeArchitectures=arm64-v8a
       - uses: actions/upload-artifact@v4
         with:
           name: app
