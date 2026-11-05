@@ -18,3 +18,7 @@ import App from './App';
 import {name as appName} from './app.json';
 
 AppRegistry.registerComponent(appName, () => App);
+
+import {AppRegistry as PocketPalAssistRegistry} from 'react-native';
+import PocketPalAssistRoot from './src/assistant/AssistRoot';
+PocketPalAssistRegistry.registerComponent('PocketPalAssist', () => PocketPalAssistRoot);
