@@ -103,7 +103,7 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                     for (i in 0 until r) sum += frame[i].toDouble() * frame[i].toDouble()
                     val rms = sqrt(sum / r)
                     elapsed += 20
-                    emitLevel(minOf(1.0, rms / 4000.0))
+                    if ((elapsed / 20) % 3 == 0) emitLevel(minOf(1.0, rms / 4000.0))
                     if (n < 15) {
                         floor += rms
                         n++
@@ -217,10 +217,13 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
     }
 
     // ------------------------------------------------------------ phone actions
+    @Volatile private var ok = false
+
     private fun start(i: Intent): Boolean {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return try {
             rc.startActivity(i)
+            ok = true
             true
         } catch (e: Exception) {
             false
@@ -327,6 +330,7 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
         }
         if (id == null) return "This phone has no flashlight."
         cm.setTorchMode(id, on)
+        ok = true
         return if (on) "Flashlight on" else "Flashlight off"
     }
 
@@ -360,12 +364,44 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
             "mute" -> am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
             else -> am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
         }
+        ok = true
         return "Okay"
+    }
+
+    private fun emailAddress(who: String): String {
+        val w = who.trim()
+        if (w.isEmpty()) return ""
+        val joined = w.lowercase().replace(" at ", "@").replace(" dot ", ".").replace(" ", "")
+        if (Regex("^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$").matches(joined)) return joined
+        if (ContextCompat.checkSelfPermission(rc, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            val act = rc.currentActivity
+            if (act != null) ActivityCompat.requestPermissions(act, arrayOf(Manifest.permission.READ_CONTACTS), 78)
+            return ""
+        }
+        val c = rc.contentResolver.query(
+            ContactsContract.CommonDataKinds.Email.CONTENT_URI,
+            arrayOf(ContactsContract.CommonDataKinds.Email.ADDRESS),
+            ContactsContract.CommonDataKinds.Email.DISPLAY_NAME + " LIKE ?",
+            arrayOf("%" + w + "%"), null
+        )
+        var found = ""
+        c?.use { cur -> if (cur.moveToFirst()) found = cur.getString(0) ?: "" }
+        return found
+    }
+
+    private fun email(to: String, subject: String, body: String): String {
+        val addr = emailAddress(to)
+        val i = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:"))
+        if (addr.isNotEmpty()) i.putExtra(Intent.EXTRA_EMAIL, arrayOf(addr))
+        i.putExtra(Intent.EXTRA_SUBJECT, subject)
+        i.putExtra(Intent.EXTRA_TEXT, body)
+        return if (start(i)) "Your email draft is ready." else "I could not open a mail app."
     }
 
     @ReactMethod
     fun perform(action: String, argsJson: String, promise: Promise) {
         try {
+            ok = false
             val a = JSONObject(argsJson)
             val res = when (action) {
                 "open_app" -> openApp(a.optString("app"))
@@ -385,13 +421,17 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                 "camera" -> if (start(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))) "Opening the camera" else "I could not open the camera."
                 "battery" -> {
                     val bm = rc.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+                    ok = true
                     "Battery is at " + bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) + " percent"
                 }
+                "email" -> email(a.optString("to"), a.optString("subject"), a.optString("body"))
                 else -> "I can not do that yet."
             }
-            promise.resolve(res)
+            val quiet = setOf("alarm", "timer", "flashlight", "volume", "battery")
+            val kind = if (!ok) "ERR" else if (quiet.contains(action)) "DONE" else "OK"
+            promise.resolve(kind + ":" + res)
         } catch (e: Exception) {
-            promise.resolve("That did not work: " + (e.message ?: "unknown error"))
+            promise.resolve("ERR:That did not work: " + (e.message ?: "unknown error"))
         }
     }
 }
