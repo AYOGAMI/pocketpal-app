@@ -1,6 +1,7 @@
 package com.pocketpal
 
 import android.Manifest
+import android.app.Notification
 import android.app.SearchManager
 import android.content.Context
 import android.content.Intent
@@ -8,12 +9,14 @@ import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.BatteryManager
+import android.os.Build
 import android.provider.AlarmClock
 import android.provider.ContactsContract
 import android.provider.MediaStore
@@ -169,7 +172,15 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
             ttsReady = status == TextToSpeech.SUCCESS
             val t = tts
             if (ttsReady && t != null) {
-                t.setLanguage(Locale.getDefault())
+                val lr = t.setLanguage(Locale.getDefault())
+                if (lr == TextToSpeech.LANG_MISSING_DATA || lr == TextToSpeech.LANG_NOT_SUPPORTED) t.setLanguage(Locale.US)
+                try {
+                    t.setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+                    )
+                } catch (_: Exception) {}
                 t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {}
                     override fun onDone(utteranceId: String?) {
@@ -193,6 +204,12 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                 promise.resolve(false)
                 return@withTts
             }
+            try {
+                val am = rc.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                if (am.getStreamVolume(AudioManager.STREAM_MUSIC) == 0) {
+                    am.setStreamVolume(AudioManager.STREAM_MUSIC, maxOf(2, am.getStreamMaxVolume(AudioManager.STREAM_MUSIC) / 3), 0)
+                }
+            } catch (_: Exception) {}
             val id = "u" + System.nanoTime()
             pending[id] = promise
             t.setSpeechRate(1.05f)
@@ -351,6 +368,8 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
             "location" -> Pair(Settings.ACTION_LOCATION_SOURCE_SETTINGS, "Opening location settings.")
             "sound" -> Pair(Settings.ACTION_SOUND_SETTINGS, "Opening sound settings.")
             "display" -> Pair(Settings.ACTION_DISPLAY_SETTINGS, "Opening display settings.")
+            "notification_access" -> Pair("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS", "Turn on PocketPal in notification access, then ask me again.")
+            "assistant" -> Pair(Settings.ACTION_VOICE_INPUT_SETTINGS, "Open the default assistant settings and turn on use text from screen.")
             else -> Pair(Settings.ACTION_SETTINGS, "Opening settings.")
         }
         return if (start(Intent(action))) say else "I could not open settings."
@@ -398,6 +417,114 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
         return if (start(i)) "Your email draft is ready." else "I could not open a mail app."
     }
 
+    // ------------------------------------------------------------ screen, notifications, notes
+    @ReactMethod
+    fun getScreenText(promise: Promise) {
+        promise.resolve(AssistState.screenText)
+    }
+
+    @ReactMethod
+    fun getNotifications(promise: Promise) {
+        val svc = AssistNotificationService.instance
+        if (svc == null) {
+            promise.resolve("NOACCESS")
+            return
+        }
+        try {
+            val pm = rc.packageManager
+            val sb = StringBuilder()
+            var n = 0
+            for (sbn in svc.activeNotifications) {
+                if (sbn.packageName == rc.packageName) continue
+                val nt = sbn.notification
+                if ((nt.flags and Notification.FLAG_GROUP_SUMMARY) != 0) continue
+                if (sbn.isOngoing) continue
+                val ex = nt.extras
+                val title = ex.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+                val text = (ex.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: ex.getCharSequence(Notification.EXTRA_TEXT))?.toString() ?: ""
+                if (title.isBlank() && text.isBlank()) continue
+                val app = try { pm.getApplicationLabel(pm.getApplicationInfo(sbn.packageName, 0)).toString() } catch (e: Exception) { sbn.packageName }
+                sb.append(app).append(": ").append(title)
+                if (text.isNotBlank()) sb.append(" - ").append(text)
+                sb.append("\n")
+                n++
+                if (n >= 25) break
+            }
+            promise.resolve(sb.toString())
+        } catch (e: Exception) {
+            promise.resolve("")
+        }
+    }
+
+    private fun notes() = rc.getSharedPreferences("assist_notes", Context.MODE_PRIVATE)
+
+    @ReactMethod
+    fun addNote(text: String, promise: Promise) {
+        val p = notes()
+        val old = p.getString("all", "") ?: ""
+        val stamp = java.text.SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(java.util.Date())
+        p.edit().putString("all", old + stamp + " - " + text.trim() + "\n").apply()
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun getNotes(promise: Promise) {
+        promise.resolve(notes().getString("all", "") ?: "")
+    }
+
+    @ReactMethod
+    fun clearNotes(promise: Promise) {
+        notes().edit().remove("all").apply()
+        promise.resolve(true)
+    }
+
+    // ------------------------------------------------------------ settings + call helper
+    @ReactMethod
+    fun getSettings(promise: Promise) {
+        promise.resolve(rc.getSharedPreferences("assist_prefs", Context.MODE_PRIVATE).getString("json", "{}") ?: "{}")
+    }
+
+    @ReactMethod
+    fun setSettings(json: String, promise: Promise) {
+        rc.getSharedPreferences("assist_prefs", Context.MODE_PRIVATE).edit().putString("json", json).apply()
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun callHelperRunning(promise: Promise) {
+        promise.resolve(CallHelperService.running)
+    }
+
+    @ReactMethod
+    fun callHelper(on: Boolean, promise: Promise) {
+        promise.resolve(callHelperImpl(on))
+    }
+
+    private fun callHelperImpl(on: Boolean): String {
+        if (!on) {
+            rc.stopService(Intent(rc, CallHelperService::class.java))
+            ok = true
+            return "Call helper is off."
+        }
+        val perms = arrayListOf(
+            Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG,
+            Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.SEND_SMS,
+            Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_CONTACTS
+        )
+        if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        val need = ArrayList<String>()
+        for (p in perms) if (ContextCompat.checkSelfPermission(rc, p) != PackageManager.PERMISSION_GRANTED) need.add(p)
+        if (need.isNotEmpty()) {
+            val act = rc.currentActivity
+            if (act != null) ActivityCompat.requestPermissions(act, need.toTypedArray(), 90)
+            return "Please allow the permissions Android asks for, then turn the call helper on again. If Android blocks them, open PocketPal in app info, tap the three dots and allow restricted settings."
+        }
+        ContextCompat.startForegroundService(rc, Intent(rc, CallHelperService::class.java))
+        ok = true
+        val secs = AssistSettings.int(rc, "callSeconds", 20)
+        return "Call helper is on. If you ignore a call for $secs seconds, I decline it, text the caller, and save who called and why in your notes."
+    }
+
     @ReactMethod
     fun perform(action: String, argsJson: String, promise: Promise) {
         try {
@@ -425,9 +552,10 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                     "Battery is at " + bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) + " percent"
                 }
                 "email" -> email(a.optString("to"), a.optString("subject"), a.optString("body"))
+                "callhelper" -> callHelperImpl(a.optBoolean("on", true))
                 else -> "I can not do that yet."
             }
-            val quiet = setOf("alarm", "timer", "flashlight", "volume", "battery")
+            val quiet = setOf("alarm", "timer", "flashlight", "volume", "battery", "callhelper")
             val kind = if (!ok) "ERR" else if (quiet.contains(action)) "DONE" else "OK"
             promise.resolve(kind + ":" + res)
         } catch (e: Exception) {

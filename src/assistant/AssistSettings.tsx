@@ -1,0 +1,190 @@
+import React, {useEffect, useState} from 'react';
+import {
+  NativeModules,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+
+import {modelStore} from '../store';
+import {AssistSettingsT, DEFAULTS, loadSettings, saveSettings} from './settingsShared';
+
+const N: any = (NativeModules as any).AssistNative;
+
+const Row: React.FC<{title: string; hint?: string; children?: React.ReactNode}> = ({title, hint, children}) => (
+  <View style={st.row}>
+    <View style={st.rowText}>
+      <Text style={st.title}>{title}</Text>
+      {!!hint && <Text style={st.hint}>{hint}</Text>}
+    </View>
+    {children}
+  </View>
+);
+
+const Chips: React.FC<{options: Array<[string, any]>; value: any; onPick: (v: any) => void}> = ({options, value, onPick}) => (
+  <View style={st.chips}>
+    {options.map(([label, v]) => (
+      <Pressable key={label} onPress={() => onPick(v)} style={[st.chip, value === v && st.chipOn]}>
+        <Text style={[st.chipText, value === v && st.chipTextOn]}>{label}</Text>
+      </Pressable>
+    ))}
+  </View>
+);
+
+const Section: React.FC<{title: string}> = ({title}) => <Text style={st.section}>{title}</Text>;
+
+export default function AssistSettings() {
+  const [s, setS] = useState<AssistSettingsT>(DEFAULTS);
+  const [models, setModels] = useState<Array<{id: string; name: string}>>([]);
+  const [msg, setMsg] = useState('');
+  const [helperOn, setHelperOn] = useState(false);
+  const [notes, setNotes] = useState('');
+
+  useEffect(() => {
+    loadSettings().then(setS);
+    N?.callHelperRunning().then(setHelperOn).catch(() => {});
+    const t = setInterval(() => {
+      const list: any[] = (modelStore as any).models ?? [];
+      setModels(list.filter(m => m.isDownloaded).map(m => ({id: m.id, name: m.name ?? m.id})));
+    }, 800);
+    return () => clearInterval(t);
+  }, []);
+
+  const set = (patch: Partial<AssistSettingsT>) => {
+    const next = {...s, ...patch};
+    setS(next);
+    saveSettings(next);
+  };
+
+  const toggleHelper = async () => {
+    const res: string = await N.callHelper(!helperOn);
+    setMsg(res);
+    setTimeout(() => N.callHelperRunning().then(setHelperOn).catch(() => {}), 600);
+  };
+
+  return (
+    <ScrollView style={st.root} contentContainerStyle={st.content}>
+      <Text style={st.h1}>PocketPal Assistant</Text>
+      <Text style={st.sub}>Everything here has a sensible default. Change what you like.</Text>
+
+      <Section title="Voice and listening" />
+      <Row title="Use PocketPal's own voice" hint="Off = your phone's built-in voice (faster to start).">
+        <Switch value={s.usePocketVoice} onValueChange={v => set({usePocketVoice: v})} />
+      </Row>
+      <Row title="Wait after you stop talking" hint="How long it waits before it answers.">
+        <Chips options={[['Quick', 500], ['Normal', 750], ['Patient', 1200]]} value={s.silenceMs} onPick={v => set({silenceMs: v})} />
+      </Row>
+      <Row title="Keep listening for follow-ups" hint="Off = it closes after each answer.">
+        <Switch value={s.followUp} onValueChange={v => set({followUp: v})} />
+      </Row>
+      <Row title="Phone actions" hint="Open apps, maps, alarms, calls, texts, email, flashlight and more.">
+        <Switch value={s.phoneActions} onValueChange={v => set({phoneActions: v})} />
+      </Row>
+
+      <Section title="AI model and battery" />
+      <Row title="Model for the assistant" hint="Auto picks your smallest downloaded model: least memory and battery.">
+        <Chips options={[['Auto (smallest)', 'auto'], ...models.map(m => [m.name, m.id] as [string, any])]} value={s.modelId} onPick={v => set({modelId: v})} />
+      </Row>
+      <Row title="Unload the model right after each answer" hint="Saves battery and memory. The model is always unloaded when you close the panel.">
+        <Switch value={s.unloadAfterAnswer} onValueChange={v => set({unloadAfterAnswer: v})} />
+      </Row>
+
+      <Section title="Look" />
+      <Row title="Dark shade at the bottom">
+        <Switch value={s.showShade} onValueChange={v => set({showShade: v})} />
+      </Row>
+      <Row title="Colour glow at the bottom">
+        <Switch value={s.showGlow} onValueChange={v => set({showGlow: v})} />
+      </Row>
+      <Row title="Cloud size">
+        <Chips options={[['Small', 0.8], ['Normal', 1], ['Big', 1.25]]} value={s.cloudSize} onPick={v => set({cloudSize: v})} />
+      </Row>
+
+      <Section title="Reading your screen and notifications" />
+      <Row title="Notification access" hint="Needed for 'read my notifications'.">
+        <Pressable style={st.btn} onPress={() => N.perform('settings', JSON.stringify({page: 'notification_access'}))}>
+          <Text style={st.btnText}>Open</Text>
+        </Pressable>
+      </Row>
+      <Row title="Use text from screen" hint="Turn this on in the default assistant settings so it can read the screen.">
+        <Pressable style={st.btn} onPress={() => N.perform('settings', JSON.stringify({page: 'assistant'}))}>
+          <Text style={st.btnText}>Open</Text>
+        </Pressable>
+      </Row>
+
+      <Section title="Call helper" />
+      <Text style={st.note}>
+        Android does not let any app answer a call and talk to the caller. So the helper does the closest thing: if you ignore a
+        call, it declines it, texts the caller, and saves who called and why in your notes, even when the phone is locked.
+      </Text>
+      <Row title={helperOn ? 'Call helper is ON' : 'Call helper is OFF'} hint="Starts a small always-on notification while on.">
+        <Pressable style={[st.btn, helperOn && st.btnOn]} onPress={toggleHelper}>
+          <Text style={st.btnText}>{helperOn ? 'Turn off' : 'Turn on'}</Text>
+        </Pressable>
+      </Row>
+      <Row title="Decline after ignoring for" hint="Seconds the phone rings before it acts.">
+        <Chips options={[['10 s', 10], ['20 s', 20], ['30 s', 30], ['45 s', 45]]} value={s.callSeconds} onPick={v => set({callSeconds: v})} />
+      </Row>
+      <Row title="Decline the call">
+        <Switch value={s.callDecline} onValueChange={v => set({callDecline: v})} />
+      </Row>
+      <Row title="Text the caller">
+        <Switch value={s.callSms} onValueChange={v => set({callSms: v})} />
+      </Row>
+      <Text style={st.hint}>Message to send</Text>
+      <TextInput style={st.input} multiline value={s.callSmsText} onChangeText={v => set({callSmsText: v})} placeholderTextColor="#777" />
+      <Row title="Save who called and why in my notes">
+        <Switch value={s.callNote} onValueChange={v => set({callNote: v})} />
+      </Row>
+      <Row title="Show a notification with the reason">
+        <Switch value={s.callNotify} onValueChange={v => set({callNotify: v})} />
+      </Row>
+
+      <Section title="My notes" />
+      <View style={st.btnRow}>
+        <Pressable style={st.btn} onPress={async () => setNotes(String((await N.getNotes()) || 'No notes yet.'))}>
+          <Text style={st.btnText}>Show notes</Text>
+        </Pressable>
+        <Pressable style={st.btn} onPress={async () => { await N.clearNotes(); setNotes('Notes cleared.'); }}>
+          <Text style={st.btnText}>Clear notes</Text>
+        </Pressable>
+      </View>
+      {!!notes && <Text style={st.notes}>{notes}</Text>}
+
+      <Pressable style={[st.btn, st.reset]} onPress={() => { setS(DEFAULTS); saveSettings(DEFAULTS); setMsg('Back to the default settings.'); }}>
+        <Text style={st.btnText}>Reset everything to defaults</Text>
+      </Pressable>
+      {!!msg && <Text style={st.msg}>{msg}</Text>}
+    </ScrollView>
+  );
+}
+
+const st = StyleSheet.create({
+  root: {flex: 1, backgroundColor: '#0F0F17'},
+  content: {padding: 20, paddingBottom: 60},
+  h1: {color: '#FFFFFF', fontSize: 26, fontWeight: '700', marginTop: 20},
+  sub: {color: '#9A9DB0', marginTop: 6, marginBottom: 8},
+  section: {color: '#B9A8FF', fontSize: 14, fontWeight: '700', marginTop: 26, marginBottom: 6, textTransform: 'uppercase'},
+  row: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, gap: 12, flexWrap: 'wrap'},
+  rowText: {flex: 1, minWidth: 180},
+  title: {color: '#FFFFFF', fontSize: 16},
+  hint: {color: '#8E91A5', fontSize: 12, marginTop: 3},
+  note: {color: '#C9CBD8', fontSize: 13, lineHeight: 19, marginBottom: 6},
+  chips: {flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'flex-end'},
+  chip: {paddingHorizontal: 12, paddingVertical: 7, borderRadius: 16, backgroundColor: '#1D1D2B'},
+  chipOn: {backgroundColor: '#7C5CFF'},
+  chipText: {color: '#C9CBD8', fontSize: 13},
+  chipTextOn: {color: '#FFFFFF', fontWeight: '700'},
+  btn: {paddingHorizontal: 16, paddingVertical: 9, borderRadius: 18, backgroundColor: '#2A2A3D'},
+  btnOn: {backgroundColor: '#7C5CFF'},
+  btnText: {color: '#FFFFFF', fontSize: 14},
+  btnRow: {flexDirection: 'row', gap: 10},
+  input: {color: '#FFFFFF', backgroundColor: '#1D1D2B', borderRadius: 12, padding: 12, marginTop: 6, minHeight: 70, textAlignVertical: 'top'},
+  notes: {color: '#D8DAE0', marginTop: 12, lineHeight: 20},
+  reset: {marginTop: 28, alignSelf: 'flex-start'},
+  msg: {color: '#FFD580', marginTop: 14, lineHeight: 19},
+});

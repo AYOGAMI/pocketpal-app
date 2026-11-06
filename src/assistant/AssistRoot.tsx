@@ -16,6 +16,8 @@ import {asrStore, modelStore, ttsStore} from '../store';
 import {whisperAsrEngine} from '../services/asr';
 import {ttsRuntime} from '../services/tts';
 
+import {AssistSettingsT, DEFAULTS, loadSettings} from './settingsShared';
+
 // PocketPal assistant: a small transparent living cloud at the bottom of the screen.
 // It listens, understands what you want, runs phone actions (apps, maps, alarms, mail...)
 // or answers with the on-device model. Every model is unloaded as soon as it is not needed.
@@ -27,16 +29,57 @@ type Phase = 'starting' | 'listening' | 'thinking' | 'speaking';
 type Msg = {role: 'user' | 'assistant'; content: string};
 
 // ---------------------------------------------------------------- loading and unloading
+let S: AssistSettingsT = DEFAULTS;
 let sessionOver = false;
-let loadedByAssistant = false;
+let assistActive = false;
+let baselineCtx = false;
+let baselineFlags: {was: boolean; id: any} = {was: false, id: undefined};
 
+const guard = (p: Promise<any>, ms: number): Promise<any> =>
+  Promise.race([p.catch(() => {}), sleep(ms)]);
+
+// While the panel is open the app must not reload "its" model behind our back.
+try {
+  const ms0: any = modelStore;
+  const orig = ms0.checkAndReloadAutoReleasedModel;
+  if (typeof orig === 'function' && !ms0.__assistPatched) {
+    ms0.__assistPatched = true;
+    ms0.checkAndReloadAutoReleasedModel = (...args: any[]) =>
+      assistActive ? Promise.resolve() : orig.apply(ms0, args);
+  }
+} catch (_e) {
+  // the store does not allow it; ownership by baseline below still unloads the model
+}
+
+function beginSession() {
+  const ms: any = modelStore;
+  sessionOver = false;
+  assistActive = true;
+  baselineCtx = !!ms.context && !ms.isContextLoading; // loaded by the app before we started: never ours
+  baselineFlags = {was: !!ms.wasAutoReleased, id: ms.lastAutoReleasedModelId};
+}
+
+// Unloads any model that was loaded during this session (by us or by the app waking up).
 async function offloadModel() {
-  if (loadedByAssistant) {
-    loadedByAssistant = false;
+  const ms: any = modelStore;
+  if (baselineCtx) {
+    return;
+  }
+  for (let i = 0; i < 200 && ms.isContextLoading; i++) {
+    await sleep(150);
+  }
+  if (ms.context) {
     try {
-      await (modelStore as any).releaseContext();
+      await ms.releaseContext();
     } catch (_e) {
       // ignore
+    }
+    if (baselineFlags.was) {
+      try {
+        ms.markAutoReleased?.(baselineFlags.id ?? ms.activeModelId);
+      } catch (_e) {
+        // ignore
+      }
     }
   }
 }
@@ -44,11 +87,11 @@ async function offloadModel() {
 // Loads the smallest downloaded model (less memory, less battery, other apps are not killed).
 async function ensureModel(): Promise<boolean> {
   const ms: any = modelStore;
-  for (let i = 0; i < 60 && ms.isContextLoading; i++) {
+  for (let i = 0; i < 200 && ms.isContextLoading; i++) {
     await sleep(150);
   }
   if (ms.context) {
-    return true; // loaded by the app itself: use it, never unload it
+    return true;
   }
   for (let i = 0; i < 40 && !(ms.models && ms.models.length > 0); i++) {
     await sleep(150);
@@ -59,11 +102,11 @@ async function ensureModel(): Promise<boolean> {
     .filter(m => typeof m.size === 'number' && m.size > 0)
     .sort((a, b) => a.size - b.size);
   const id = ms.lastUsedModelId ?? ms.activeModelId ?? ms.lastAutoReleasedModelId;
-  const model = sized[0] ?? list.find(m => m.id === id) ?? downloaded[0];
+  const chosen = S.modelId !== 'auto' ? list.find(m => m.id === S.modelId && m.isDownloaded) : undefined;
+  const model = chosen ?? sized[0] ?? list.find(m => m.id === id) ?? downloaded[0];
   if (!model) {
     return false;
   }
-  loadedByAssistant = true;
   try {
     await ms.initContext(model);
   } finally {
@@ -100,7 +143,8 @@ async function unloadVoice() {
 }
 
 // ---------------------------------------------------------------- PocketPal's own voice
-let voiceMode: 'unknown' | 'text' | 'idtext' | 'none' = 'unknown';
+// Filled in at build time from the app's own TTSStore.play signature, e.g. ['id','text'].
+const PLAY_ARGS: string[] = ['id', 'text', 'other']; // generated
 
 const isPlaying = () => {
   const mode = (ttsStore as any).playbackState?.mode;
@@ -117,43 +161,31 @@ async function waitIdle(maxMs: number) {
 // Speaks with the voice chosen in PocketPal. Returns false if that was not possible.
 async function speakApp(text: string): Promise<boolean> {
   const t: any = ttsStore;
-  if (voiceMode === 'none' || !t?.currentVoice || typeof t.play !== 'function') {
+  if (!S.usePocketVoice || !PLAY_ARGS.includes('text') || !t?.currentVoice || typeof t.play !== 'function') {
     return false;
   }
-  const attempts: Array<['text' | 'idtext', () => any]> = [
-    ['text', () => t.play(text)],
-    ['idtext', () => t.play('assistant-' + Date.now(), text)],
-  ];
-  for (const [kind, call] of attempts) {
-    if (voiceMode !== 'unknown' && voiceMode !== kind) {
-      continue;
+  try {
+    const args = PLAY_ARGS.map(k => (k === 'text' ? text : k === 'id' ? 'assistant-' + Date.now() : undefined));
+    const p = Promise.resolve(t.play(...args));
+    p.catch(() => {});
+    let started = false;
+    for (let i = 0; i < 40 && !started; i++) {
+      await sleep(100);
+      started = isPlaying();
     }
-    try {
-      const p = Promise.resolve(call());
-      p.catch(() => {});
-      let started = false;
-      for (let i = 0; i < 30 && !started; i++) {
-        await sleep(100);
-        started = isPlaying();
-      }
-      if (started) {
-        voiceMode = kind;
-        await waitIdle(90000);
-        return true;
-      }
+    if (!started) {
       try {
-        await t.stop('assistant');
+        await guard(t.stop('assistant'), 1500);
       } catch (_e) {
         // ignore
       }
-    } catch (_e) {
-      // try the next way of calling it
+      return false;
     }
+    await waitIdle(90000);
+    return true;
+  } catch (_e) {
+    return false;
   }
-  if (voiceMode === 'unknown') {
-    voiceMode = 'none';
-  }
-  return false;
 }
 
 // ---------------------------------------------------------------- quick intent rules
@@ -201,6 +233,27 @@ function ruleIntent(raw: string): any | null {
       t.match(/^(?:e ?mail|mail) (.+?)(?: (?:about|saying|regarding|telling|asking|that) (.+))?$/))
   ) {
     return {a: 'email', to: (m[1] ?? '').trim(), topic: (m[2] ?? '').trim()};
+  }
+  if (/(unload|offload|free up|free) (the )?(model|memory|ai)|turn off (the )?(model|ai)/.test(t)) {
+    return {a: 'unload'};
+  }
+  if (/(call (helper|screening|screener|assistant|answering)|screen (my )?calls|auto (decline|reject) (my )?calls)/.test(t)) {
+    return {a: 'callhelper', on: !/\b(off|stop|disable|cancel)\b/.test(t)};
+  }
+  if (/(notification|notifications|notifs)/.test(t) && /(read|check|summari|what|any|show|tell)/.test(t)) {
+    return {a: 'notifs'};
+  }
+  if ((/(screen|page)/.test(t) && /(read|summari|what s on|what is on|tell me what|explain)/.test(t)) || /^(summari[sz]e|read|explain) (this|it)$/.test(t)) {
+    return {a: 'screen'};
+  }
+  if (/^(?:read|show|what are)(?: me)?(?: all)? my notes$/.test(t)) {
+    return {a: 'notes_read'};
+  }
+  if (/^(?:clear|delete)(?: all)? my notes$/.test(t)) {
+    return {a: 'notes_clear'};
+  }
+  if ((m = t.match(/^(?:take|add|make|write|save)(?: me)?(?: a)? note(?: that| saying| to)?\s*(.*)$/) || t.match(/^remember (?:that )?(.+)$/))) {
+    return {a: 'note_add', text: (m[1] ?? '').trim()};
   }
   if (/what (is|s) the time|^what time is it|tell me the time|^time$/.test(t)) {
     return {say: 'It is ' + new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'})};
@@ -314,7 +367,9 @@ async function complete(messages: any[], maxTokens: number): Promise<string> {
     },
     () => {},
   );
-  return String(res?.text ?? '')
+  const raw =
+    res?.text ?? res?.content ?? res?.choices?.[0]?.message?.content ?? res?.reasoning_content ?? '';
+  return String(raw)
     .replace(/<think>[\s\S]*?<\/think>/g, '')
     .trim();
 }
@@ -341,6 +396,35 @@ const spokenClean = (s: string) =>
     .trim()
     .slice(0, 420);
 
+async function summarise(kind: 'screen' | 'notifications', text: string): Promise<string> {
+  await unloadWhisper();
+  const ok = await ensureModel();
+  if (!ok) {
+    return 'I could not load a model to summarise that.';
+  }
+  const what = kind === 'screen' ? 'screen text' : 'phone notifications';
+  const prompt =
+    'Summarise these ' + what + ' in three short spoken sentences. Be concrete: who or what app, and the key point. Skip spam and ads.\n\n' +
+    text.slice(0, kind === 'screen' ? 3000 : 2400);
+  let out = '';
+  try {
+    out = await complete([{role: 'user', content: prompt}], 150);
+  } finally {
+    if (S.unloadAfterAnswer) {
+      await offloadModel();
+    }
+  }
+  return out || 'I could not summarise that.';
+}
+
+const FIRST_LINES = (txt: string, n: number) =>
+  txt
+    .trim()
+    .split('\n')
+    .filter(l => l.trim())
+    .slice(0, n)
+    .join('. ');
+
 // ---------------------------------------------------------------- the living cloud
 const BLOBS = [
   {size: 58, x: -30, y: 8, color: 'rgba(124,92,255,0.50)', dx: 7, dy: 5, dur: 2600},
@@ -357,6 +441,43 @@ const loopValue = (v: Animated.Value, dur: number) =>
       Animated.timing(v, {toValue: 0, duration: dur, easing: Easing.inOut(Easing.sin), useNativeDriver: true}),
     ]),
   );
+
+const SHADE_STEPS = 18;
+const BottomShade: React.FC = () => (
+  <View pointerEvents="none" style={styles.shade}>
+    {Array.from({length: SHADE_STEPS}).map((_, i) => (
+      <View
+        key={i}
+        style={{flex: 1, backgroundColor: 'rgba(0,0,0,' + (0.62 * Math.pow((i + 1) / SHADE_STEPS, 1.7)).toFixed(3) + ')'}}
+      />
+    ))}
+  </View>
+);
+
+const GLOWS = [
+  {h: 30, c: 'rgba(80,120,255,0.20)'},
+  {h: 56, c: 'rgba(150,100,255,0.14)'},
+  {h: 86, c: 'rgba(255,110,190,0.10)'},
+  {h: 120, c: 'rgba(92,225,230,0.07)'},
+];
+const BottomGlow: React.FC<{amp: Animated.Value}> = ({amp}) => (
+  <Animated.View
+    pointerEvents="none"
+    style={[
+      styles.glowWrap,
+      {
+        opacity: amp.interpolate({inputRange: [0, 1], outputRange: [0.5, 1]}),
+        transform: [{scaleY: amp.interpolate({inputRange: [0, 1], outputRange: [0.9, 1.25]})}],
+      },
+    ]}>
+    {GLOWS.map((g, i) => (
+      <View
+        key={i}
+        style={{position: 'absolute', bottom: -g.h / 2, left: -80, right: -80, height: g.h, borderRadius: g.h, backgroundColor: g.c}}
+      />
+    ))}
+  </Animated.View>
+);
 
 const Cloud: React.FC<{amp: Animated.Value; spin: Animated.Value}> = ({amp, spin}) => {
   const drifts = useRef(BLOBS.map(() => new Animated.Value(0))).current;
@@ -407,12 +528,21 @@ export default function AssistRoot() {
   const [phase, setPhase] = useState<Phase>('starting');
   const [heard, setHeard] = useState('');
   const [reply, setReply] = useState('');
+  const [hidden, setHidden] = useState(false);
+  const [shade, setShade] = useState(true);
+  const [glow, setGlow] = useState(true);
+  const [size, setSize] = useState(1);
   const amp = useRef(new Animated.Value(0.15)).current;
   const spin = useRef(new Animated.Value(0)).current;
   const alive = useRef(true);
   const closing = useRef(false);
   const acting = useRef(false);
   const phaseRef = useRef<Phase>('starting');
+  const started = useRef(false);
+  if (!started.current) {
+    started.current = true;
+    beginSession();
+  }
   const loop = useRef<Animated.CompositeAnimation | null>(null);
   const spinLoop = useRef<Animated.CompositeAnimation | null>(null);
 
@@ -423,9 +553,7 @@ export default function AssistRoot() {
 
   const releaseAll = async () => {
     sessionOver = true;
-    await unloadWhisper();
-    await offloadModel();
-    await unloadVoice();
+    await Promise.all([guard(unloadWhisper(), 6000), guard(offloadModel(), 30000), guard(unloadVoice(), 6000)]);
   };
 
   const finish = async () => {
@@ -434,14 +562,20 @@ export default function AssistRoot() {
     }
     closing.current = true;
     alive.current = false;
+    setHidden(true);
     try {
       N?.stopListening();
       N?.stopSpeaking();
-      await (ttsStore as any).stop('assistant');
+    } catch (_e) {
+      // ignore
+    }
+    try {
+      await guard(Promise.resolve((ttsStore as any).stop?.('assistant')), 2000);
     } catch (_e) {
       // ignore
     }
     await releaseAll();
+    assistActive = false;
     N?.close();
   };
 
@@ -511,7 +645,6 @@ export default function AssistRoot() {
   }, []);
 
   useEffect(() => {
-    sessionOver = false;
     alive.current = true;
     run();
     return () => {
@@ -527,13 +660,16 @@ export default function AssistRoot() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const say = async (text: string) => {
-    const s = spokenClean(text);
+  const say = async (text: any) => {
+    let s = spokenClean(String(text ?? ''));
+    if (!s || s === 'undefined' || s === 'null') {
+      s = 'Sorry, something went wrong with that.';
+    }
     setReply(s);
     setPh('speaking');
     const ok = await speakApp(s);
     if (!ok) {
-      await N.speak(s);
+      await Promise.race([N.speak(s), sleep(40000)]);
     }
   };
 
@@ -544,6 +680,10 @@ export default function AssistRoot() {
         return;
       }
       setPh('starting');
+      S = await loadSettings();
+      setShade(S.showShade);
+      setGlow(S.showGlow);
+      setSize(S.cloudSize);
       try {
         await (asrStore as any).init();
       } catch (_e) {
@@ -568,7 +708,7 @@ export default function AssistRoot() {
         setPh('listening');
         setHeard('');
         const warm = loadWhisper(tier).catch(() => {}); // loads while you speak
-        const pcm: string = await N.listen(14000, 900, first ? 8000 : 6000);
+        const pcm: string = await N.listen(14000, S.silenceMs, first ? 8000 : 6000);
         if (!alive.current) {
           return;
         }
@@ -593,11 +733,68 @@ export default function AssistRoot() {
         setHeard(text);
 
         let act: any = pendingEmail ? {a: 'email', to: pendingEmail.to, topic: text} : ruleIntent(text);
+        if (act && !S.phoneActions && act.a && !['close', 'unload', 'notes_read'].includes(act.a)) {
+          act = null;
+        }
         pendingEmail = null;
         let spoken = '';
         if (act?.a === 'close') {
           await finish();
           return;
+        }
+        if (act && ['screen', 'notifs', 'note_add', 'notes_read', 'notes_clear', 'unload'].includes(act.a)) {
+          const sp = act;
+          act = null;
+          setPh('thinking');
+          if (sp.a === 'unload') {
+            spoken = 'Okay, everything is unloaded.';
+            await releaseAll();
+            await say(spoken);
+            await finish();
+            return;
+          }
+          if (sp.a === 'note_add') {
+            if (!sp.text) {
+              spoken = 'What should I write in the note?';
+            } else {
+              await N.addNote(sp.text);
+              spoken = 'Saved to your notes.';
+            }
+          } else if (sp.a === 'notes_clear') {
+            await N.clearNotes();
+            spoken = 'Your notes are cleared.';
+          } else if (sp.a === 'notes_read') {
+            const nt = String((await N.getNotes()) ?? '').trim();
+            spoken = nt ? 'Your latest notes. ' + nt.split('\n').filter((l: string) => l.trim()).slice(-6).join('. ') : 'You have no notes.';
+          } else if (sp.a === 'screen') {
+            const txt = String((await N.getScreenText()) ?? '').trim();
+            if (!txt) {
+              spoken = 'I could not see any text on the screen. In the default assistant settings, turn on use text from screen.';
+            } else if (txt.length < 350) {
+              spoken = txt.replace(/\n+/g, '. ');
+            } else {
+              spoken = await summarise('screen', txt);
+            }
+          } else if (sp.a === 'notifs') {
+            const txt = String((await N.getNotifications()) ?? '').trim();
+            if (txt === 'NOACCESS') {
+              acting.current = true;
+              await releaseAll();
+              await N.perform('settings', JSON.stringify({page: 'notification_access'}));
+              await finish();
+              return;
+            }
+            if (!txt) {
+              spoken = 'You have no notifications.';
+            } else if (txt.split('\n').filter((l: string) => l.trim()).length <= 3) {
+              spoken = FIRST_LINES(txt, 3);
+            } else {
+              spoken = await summarise('notifications', txt);
+            }
+          }
+          history.push({role: 'user', content: text}, {role: 'assistant', content: spoken});
+          await say(spoken);
+          continue;
         }
         if (act?.say) {
           spoken = act.say;
@@ -628,7 +825,7 @@ export default function AssistRoot() {
               spoken = out.replace(/ACTION[\s\S]*/g, '').trim() || 'Sorry, I did not get that.';
             }
           }
-          if (!(act && act.a === 'email')) {
+          if (!(act && act.a === 'email') && S.unloadAfterAnswer) {
             await offloadModel();
           }
         }
@@ -649,12 +846,17 @@ export default function AssistRoot() {
             return;
           }
           const mail = await writeEmail(act.to ?? '', act.topic);
-          await offloadModel();
+          if (S.unloadAfterAnswer) {
+            await offloadModel();
+          }
           act = {a: 'email', to: act.to ?? '', subject: mail.subject, body: mail.body};
         }
         if (act) {
           setPh('thinking');
           const launching = LAUNCHING.includes(act.a);
+          if (act.a === 'callhelper') {
+            acting.current = true;
+          }
           if (launching) {
             acting.current = true;
             await releaseAll(); // everything is unloaded before another app takes the screen
@@ -676,6 +878,10 @@ export default function AssistRoot() {
         }
         history.push({role: 'user', content: text}, {role: 'assistant', content: spoken});
         await say(spoken);
+        if (!S.followUp) {
+          await finish();
+          return;
+        }
       }
     } catch (e: any) {
       setReply('Something went wrong: ' + String(e?.message ?? e).slice(0, 140));
@@ -689,9 +895,14 @@ export default function AssistRoot() {
     phase === 'starting' ? 'Getting ready...' : phase === 'listening' ? 'Listening...' : phase === 'thinking' ? 'Thinking...' : '';
   const line = heard || hint;
 
+  if (hidden) {
+    return <View style={styles.root} />;
+  }
   return (
     <View style={styles.root}>
       <Pressable style={StyleSheet.absoluteFill} onPress={finish} />
+      {shade && <BottomShade />}
+      {glow && <BottomGlow amp={amp} />}
       <View style={styles.bottom} pointerEvents="box-none">
         {(!!line || !!reply) && (
           <View style={styles.pill} pointerEvents="none">
@@ -714,7 +925,9 @@ export default function AssistRoot() {
               (ttsStore as any).stop?.('assistant');
             }
           }}>
-          <Cloud amp={amp} spin={spin} />
+          <View style={{transform: [{scale: size}]}}>
+            <Cloud amp={amp} spin={spin} />
+          </View>
         </Pressable>
       </View>
     </View>
@@ -741,6 +954,8 @@ const styles = StyleSheet.create({
   },
   heard: {color: '#FFFFFF', fontSize: 16, fontWeight: '600', textAlign: 'center'},
   reply: {color: '#D8DAE0', fontSize: 14, marginTop: 6, textAlign: 'center', lineHeight: 20},
+  shade: {position: 'absolute', left: 0, right: 0, bottom: 0, height: 190, flexDirection: 'column'},
+  glowWrap: {position: 'absolute', left: 0, right: 0, bottom: 0, height: 60},
   cloud: {width: 140, height: 110},
   halo: {
     position: 'absolute',
