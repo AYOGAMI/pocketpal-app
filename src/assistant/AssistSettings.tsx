@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 
 import {modelStore} from '../store';
-import {AssistSettingsT, DEFAULTS, loadSettings, saveSettings} from './settingsShared';
+import {AssistSettingsT, DEFAULTS, SkillT, loadSettings, saveSettings} from './settingsShared';
 
 const N: any = (NativeModules as any).AssistNative;
 
@@ -43,6 +43,12 @@ export default function AssistSettings() {
   const [msg, setMsg] = useState('');
   const [helperOn, setHelperOn] = useState(false);
   const [notes, setNotes] = useState('');
+  const [draft, setDraft] = useState<{name: string; phrases: string; type: SkillT['type']; value: string}>({
+    name: '',
+    phrases: '',
+    type: 'app',
+    value: '',
+  });
 
   useEffect(() => {
     loadSettings().then(setS);
@@ -59,6 +65,26 @@ export default function AssistSettings() {
     setS(next);
     saveSettings(next);
   };
+
+  const addSkill = () => {
+    if (!draft.name.trim() || !draft.phrases.trim() || !draft.value.trim()) {
+      setMsg('Fill in the name, the phrases and what it should do.');
+      return;
+    }
+    const sk: SkillT = {id: String(Date.now()), ...draft};
+    set({skills: [...(s.skills ?? []), sk]});
+    setDraft({...draft, name: '', phrases: '', value: ''});
+    setMsg('Skill added. Say one of its phrases to try it.');
+  };
+
+  const valueHint =
+    draft.type === 'app'
+      ? 'App name, for example YouTube'
+      : draft.type === 'link'
+      ? 'Web address. Use {q} for the words you say after the phrase, for example https://www.amazon.com/s?k={q}'
+      : draft.type === 'say'
+      ? 'What the assistant should say back'
+      : 'Instruction for the AI, for example: Answer like a friendly pirate';
 
   const toggleHelper = async () => {
     const res: string = await N.callHelper(!helperOn);
@@ -144,6 +170,36 @@ export default function AssistSettings() {
         <Switch value={s.callNotify} onValueChange={v => set({callNotify: v})} />
       </Row>
 
+      <Section title="My skills" />
+      <Text style={st.note}>
+        Teach the assistant your own commands. Example: phrases "open my bank", does "Open an app", value "MyBank". Or phrases
+        "search amazon for", does "Open a web link", value https://www.amazon.com/s?k={q}
+      </Text>
+      {(s.skills ?? []).map(sk => (
+        <View key={sk.id} style={st.skill}>
+          <View style={st.rowText}>
+            <Text style={st.title}>{sk.name}</Text>
+            <Text style={st.hint}>Say: {sk.phrases}</Text>
+            <Text style={st.hint}>{sk.type === 'app' ? 'Opens app' : sk.type === 'link' ? 'Opens link' : sk.type === 'say' ? 'Says' : 'Asks the AI'}: {sk.value}</Text>
+          </View>
+          <Pressable style={st.btn} onPress={() => set({skills: (s.skills ?? []).filter(x => x.id !== sk.id)})}>
+            <Text style={st.btnText}>Delete</Text>
+          </Pressable>
+        </View>
+      ))}
+      <Text style={st.hint}>New skill</Text>
+      <TextInput style={st.input1} placeholder="Name, for example Night mode" placeholderTextColor="#777" value={draft.name} onChangeText={v => setDraft({...draft, name: v})} />
+      <TextInput style={st.input1} placeholder="Phrases, separated by commas: good night, night mode" placeholderTextColor="#777" value={draft.phrases} onChangeText={v => setDraft({...draft, phrases: v})} />
+      <Chips
+        options={[['Open an app', 'app'], ['Open a web link', 'link'], ['Say something', 'say'], ['Ask the AI', 'ai']]}
+        value={draft.type}
+        onPick={v => setDraft({...draft, type: v})}
+      />
+      <TextInput style={st.input1} placeholder={valueHint} placeholderTextColor="#777" value={draft.value} onChangeText={v => setDraft({...draft, value: v})} />
+      <Pressable style={[st.btn, st.btnOn, st.add]} onPress={addSkill}>
+        <Text style={st.btnText}>Add skill</Text>
+      </Pressable>
+
       <Section title="My notes" />
       <View style={st.btnRow}>
         <Pressable style={st.btn} onPress={async () => setNotes(String((await N.getNotes()) || 'No notes yet.'))}>
@@ -185,6 +241,9 @@ const st = StyleSheet.create({
   btnRow: {flexDirection: 'row', gap: 10},
   input: {color: '#FFFFFF', backgroundColor: '#1D1D2B', borderRadius: 12, padding: 12, marginTop: 6, minHeight: 70, textAlignVertical: 'top'},
   notes: {color: '#D8DAE0', marginTop: 12, lineHeight: 20},
+  skill: {flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#161622', borderRadius: 12, padding: 12, marginBottom: 8},
+  input1: {color: '#FFFFFF', backgroundColor: '#1D1D2B', borderRadius: 12, padding: 12, marginTop: 8},
+  add: {marginTop: 12, alignSelf: 'flex-start'},
   reset: {marginTop: 28, alignSelf: 'flex-start'},
   msg: {color: '#FFD580', marginTop: 14, lineHeight: 19},
 });

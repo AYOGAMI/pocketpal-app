@@ -1,7 +1,16 @@
 import {NativeModules} from 'react-native';
 
 // Assistant settings with their defaults. Saved natively so the call helper can read them too.
+export type SkillT = {
+  id: string;
+  name: string;
+  phrases: string; // trigger phrases, separated by commas
+  type: 'app' | 'link' | 'say' | 'ai';
+  value: string;
+};
+
 export type AssistSettingsT = {
+  skills: SkillT[];
   usePocketVoice: boolean;
   modelId: string; // 'auto' = smallest downloaded model
   unloadAfterAnswer: boolean;
@@ -20,6 +29,7 @@ export type AssistSettingsT = {
 };
 
 export const DEFAULTS: AssistSettingsT = {
+  skills: [],
   usePocketVoice: true,
   modelId: 'auto',
   unloadAfterAnswer: true,

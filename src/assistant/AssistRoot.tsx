@@ -16,7 +16,7 @@ import {asrStore, modelStore, ttsStore} from '../store';
 import {whisperAsrEngine} from '../services/asr';
 import {ttsRuntime} from '../services/tts';
 
-import {AssistSettingsT, DEFAULTS, loadSettings} from './settingsShared';
+import {AssistSettingsT, DEFAULTS, SkillT, loadSettings} from './settingsShared';
 
 // PocketPal assistant: a small transparent living cloud at the bottom of the screen.
 // It listens, understands what you want, runs phone actions (apps, maps, alarms, mail...)
@@ -209,7 +209,41 @@ const clean = (s: string) =>
     .replace(/\s+/g, ' ')
     .trim();
 
-const LAUNCHING = ['open_app', 'navigate', 'search', 'music', 'camera', 'settings', 'call', 'sms', 'email'];
+const LAUNCHING = ['open_url', 'open_app', 'navigate', 'search', 'music', 'camera', 'settings', 'call', 'sms', 'email'];
+
+// Your own skills from the settings screen.
+function matchSkill(text: string): {skill: SkillT; rest: string} | null {
+  const t = clean(text);
+  for (const sk of S.skills ?? []) {
+    const phrases = String(sk.phrases ?? '')
+      .split(/[,\n]/)
+      .map(p => clean(p))
+      .filter(Boolean);
+    for (const p of phrases) {
+      const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const m = new RegExp('(^|\\s)' + esc + '(\\s|$)').exec(t);
+      if (m) {
+        const rest = t.slice(m.index + m[0].length).replace(/^(for|to|about)\s+/, '').trim();
+        return {skill: sk, rest};
+      }
+    }
+  }
+  return null;
+}
+
+function skillAct(hit: {skill: SkillT; rest: string}, fullText: string): any {
+  const v = hit.skill.value;
+  if (hit.skill.type === 'app') {
+    return {a: 'open_app', app: v};
+  }
+  if (hit.skill.type === 'link') {
+    return {a: 'open_url', url: v.split('{q}').join(encodeURIComponent(hit.rest))};
+  }
+  if (hit.skill.type === 'say') {
+    return {say: v};
+  }
+  return {a: 'skill_ai', instruction: v, input: hit.rest || fullText};
+}
 
 function ruleIntent(raw: string): any | null {
   let t = clean(raw);
@@ -732,8 +766,9 @@ export default function AssistRoot() {
         }
         setHeard(text);
 
-        let act: any = pendingEmail ? {a: 'email', to: pendingEmail.to, topic: text} : ruleIntent(text);
-        if (act && !S.phoneActions && act.a && !['close', 'unload', 'notes_read'].includes(act.a)) {
+        const hit = pendingEmail ? null : matchSkill(text);
+        let act: any = pendingEmail ? {a: 'email', to: pendingEmail.to, topic: text} : hit ? skillAct(hit, text) : ruleIntent(text);
+        if (!hit && act && !S.phoneActions && act.a && !['close', 'unload', 'notes_read'].includes(act.a)) {
           act = null;
         }
         pendingEmail = null;
@@ -742,7 +777,7 @@ export default function AssistRoot() {
           await finish();
           return;
         }
-        if (act && ['screen', 'notifs', 'note_add', 'notes_read', 'notes_clear', 'unload'].includes(act.a)) {
+        if (act && ['screen', 'notifs', 'note_add', 'notes_read', 'notes_clear', 'unload', 'skill_ai'].includes(act.a)) {
           const sp = act;
           act = null;
           setPh('thinking');
@@ -753,7 +788,25 @@ export default function AssistRoot() {
             await finish();
             return;
           }
-          if (sp.a === 'note_add') {
+          if (sp.a === 'skill_ai') {
+            await unloadWhisper();
+            const okm = await ensureModel();
+            if (!okm) {
+              spoken = 'I could not load a model.';
+            } else {
+              try {
+                spoken = await complete(
+                  [{role: 'system', content: sp.instruction}, {role: 'user', content: sp.input}],
+                  160,
+                );
+              } finally {
+                if (S.unloadAfterAnswer) {
+                  await offloadModel();
+                }
+              }
+              spoken = spoken || 'Sorry, I did not get that.';
+            }
+          } else if (sp.a === 'note_add') {
             if (!sp.text) {
               spoken = 'What should I write in the note?';
             } else {

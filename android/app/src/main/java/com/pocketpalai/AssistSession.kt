@@ -10,7 +10,7 @@ import android.service.voice.VoiceInteractionSession
 class AssistSession(ctx: Context) : VoiceInteractionSession(ctx) {
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
-        AssistState.screenText = ""
+        PocketScreen.screenText = ""
         val intent = Intent(context, AssistLaunchActivity::class.java)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
@@ -31,7 +31,7 @@ class AssistSession(ctx: Context) : VoiceInteractionSession(ctx) {
                 collect(structure.getWindowNodeAt(w).rootViewNode, sb)
                 if (sb.length > 8000) break
             }
-            AssistState.screenText = sb.toString().take(8000)
+            PocketScreen.screenText = sb.toString().take(8000)
         } catch (e: Exception) {
         }
     }

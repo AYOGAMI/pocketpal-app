@@ -420,7 +420,7 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
     // ------------------------------------------------------------ screen, notifications, notes
     @ReactMethod
     fun getScreenText(promise: Promise) {
-        promise.resolve(AssistState.screenText)
+        promise.resolve(PocketScreen.screenText)
     }
 
     @ReactMethod
@@ -553,6 +553,10 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                 }
                 "email" -> email(a.optString("to"), a.optString("subject"), a.optString("body"))
                 "callhelper" -> callHelperImpl(a.optBoolean("on", true))
+                "open_url" -> {
+                    val u = a.optString("url")
+                    if (u.isBlank()) "There is no link to open." else if (start(Intent(Intent.ACTION_VIEW, Uri.parse(u)))) "Opening it" else "I could not open that link."
+                }
                 else -> "I can not do that yet."
             }
             val quiet = setOf("alarm", "timer", "flashlight", "volume", "battery", "callhelper")
