@@ -15,7 +15,11 @@ export type AssistSettingsT = {
   modelId: string; // 'auto' = smallest downloaded model
   unloadAfterAnswer: boolean;
   silenceMs: number;
-  followUp: boolean;
+  followUp: boolean; // kept for older saves
+  personaId: string; // 'default' or the id of one of your Pals
+  conversation: 'one' | 'follow' | 'continuous';
+  idleSeconds: number; // continuous mode: how long to wait in silence before closing
+  keepModel: boolean; // continuous mode: keep the model loaded while the conversation lasts
   showShade: boolean;
   showGlow: boolean;
   cloudSize: number; // 0.8 small, 1 normal, 1.25 big
@@ -35,6 +39,10 @@ export const DEFAULTS: AssistSettingsT = {
   unloadAfterAnswer: true,
   silenceMs: 750,
   followUp: true,
+  personaId: 'default',
+  conversation: 'follow',
+  idleSeconds: 60,
+  keepModel: true,
   showShade: true,
   showGlow: true,
   cloudSize: 1,

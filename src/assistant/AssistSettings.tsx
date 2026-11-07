@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 
-import {modelStore} from '../store';
+import {modelStore, palStore} from '../store';
 import {AssistSettingsT, DEFAULTS, SkillT, loadSettings, saveSettings} from './settingsShared';
 
 const N: any = (NativeModules as any).AssistNative;
@@ -40,9 +40,11 @@ const Section: React.FC<{title: string}> = ({title}) => <Text style={st.section}
 export default function AssistSettings() {
   const [s, setS] = useState<AssistSettingsT>(DEFAULTS);
   const [models, setModels] = useState<Array<{id: string; name: string}>>([]);
+  const [pals, setPals] = useState<Array<{id: string; name: string}>>([]);
   const [msg, setMsg] = useState('');
   const [helperOn, setHelperOn] = useState(false);
   const [notes, setNotes] = useState('');
+  const [secText, setSecText] = useState('20');
   const [draft, setDraft] = useState<{name: string; phrases: string; type: SkillT['type']; value: string}>({
     name: '',
     phrases: '',
@@ -51,11 +53,17 @@ export default function AssistSettings() {
   });
 
   useEffect(() => {
-    loadSettings().then(setS);
+    loadSettings().then(v => {
+      setS(v);
+      setSecText(String(v.callSeconds));
+    });
     N?.callHelperRunning().then(setHelperOn).catch(() => {});
     const t = setInterval(() => {
+      N?.callHelperRunning().then(setHelperOn).catch(() => {});
       const list: any[] = (modelStore as any).models ?? [];
       setModels(list.filter(m => m.isDownloaded).map(m => ({id: m.id, name: m.name ?? m.id})));
+      const pl: any[] = (palStore as any).pals ?? [];
+      setPals(pl.map(p => ({id: p.id, name: p.name ?? p.id})));
     }, 800);
     return () => clearInterval(t);
   }, []);
@@ -97,15 +105,30 @@ export default function AssistSettings() {
       <Text style={st.h1}>PocketPal Assistant</Text>
       <Text style={st.sub}>Everything here has a sensible default. Change what you like.</Text>
 
+      <Section title="Who answers" />
+      <Row title="Assistant persona" hint="Default is the plain PocketPal assistant. Pick one of your Pals to give the assistant its personality.">
+        <Chips options={[['Default', 'default'], ...pals.map(p => [p.name, p.id] as [string, any])]} value={s.personaId} onPick={v => set({personaId: v})} />
+      </Row>
+      <Row title="Conversation" hint="One question: answers and closes. Follow-ups: waits a few seconds for more. Continuous: keeps chatting until you say stop or tap outside.">
+        <Chips options={[['One question', 'one'], ['Follow-ups', 'follow'], ['Continuous', 'continuous']]} value={s.conversation} onPick={v => set({conversation: v})} />
+      </Row>
+      {s.conversation === 'continuous' && (
+        <>
+          <Row title="Close after silence" hint="How long it waits before ending a continuous chat.">
+            <Chips options={[['30 s', 30], ['1 min', 60], ['2 min', 120], ['5 min', 300]]} value={s.idleSeconds} onPick={v => set({idleSeconds: v})} />
+          </Row>
+          <Row title="Keep the model loaded during the chat" hint="Faster replies, but uses more battery. It is always unloaded when the panel closes.">
+            <Switch value={s.keepModel} onValueChange={v => set({keepModel: v})} />
+          </Row>
+        </>
+      )}
+
       <Section title="Voice and listening" />
       <Row title="Use PocketPal's own voice" hint="Off = your phone's built-in voice (faster to start).">
         <Switch value={s.usePocketVoice} onValueChange={v => set({usePocketVoice: v})} />
       </Row>
       <Row title="Wait after you stop talking" hint="How long it waits before it answers.">
         <Chips options={[['Quick', 500], ['Normal', 750], ['Patient', 1200]]} value={s.silenceMs} onPick={v => set({silenceMs: v})} />
-      </Row>
-      <Row title="Keep listening for follow-ups" hint="Off = it closes after each answer.">
-        <Switch value={s.followUp} onValueChange={v => set({followUp: v})} />
       </Row>
       <Row title="Phone actions" hint="Open apps, maps, alarms, calls, texts, email, flashlight and more.">
         <Switch value={s.phoneActions} onValueChange={v => set({phoneActions: v})} />
@@ -147,14 +170,35 @@ export default function AssistSettings() {
         Android does not let any app answer a call and talk to the caller. So the helper does the closest thing: if you ignore a
         call, it declines it, texts the caller, and saves who called and why in your notes, even when the phone is locked.
       </Text>
-      <Row title={helperOn ? 'Call helper is ON' : 'Call helper is OFF'} hint="Starts a small always-on notification while on.">
+      <Row title={helperOn ? 'Call helper is ON' : 'Call helper is OFF'} hint={helperOn ? 'Running now. Ignored calls are declined after the wait below.' : 'Tap Turn on, then allow every permission Android asks for.'}>
         <Pressable style={[st.btn, helperOn && st.btnOn]} onPress={toggleHelper}>
           <Text style={st.btnText}>{helperOn ? 'Turn off' : 'Turn on'}</Text>
         </Pressable>
       </Row>
-      <Row title="Decline after ignoring for" hint="Seconds the phone rings before it acts.">
-        <Chips options={[['10 s', 10], ['20 s', 20], ['30 s', 30], ['45 s', 45]]} value={s.callSeconds} onPick={v => set({callSeconds: v})} />
+      <Row title="Wait before declining" hint="Seconds the phone rings before the helper acts. Pick one or type your own (5 to 120).">
+        <Chips
+          options={[['10 s', 10], ['20 s', 20], ['30 s', 30], ['45 s', 45], ['60 s', 60]]}
+          value={s.callSeconds}
+          onPick={v => {
+            set({callSeconds: v});
+            setSecText(String(v));
+          }}
+        />
       </Row>
+      <View style={st.secRow}>
+        <Text style={st.title}>Custom seconds</Text>
+        <TextInput
+          style={st.secInput}
+          keyboardType="number-pad"
+          value={secText}
+          onChangeText={v => setSecText(v.replace(/\D/g, '').slice(0, 3))}
+          onEndEditing={() => {
+            const n = Math.max(5, Math.min(120, parseInt(secText || '20', 10) || 20));
+            setSecText(String(n));
+            set({callSeconds: n});
+          }}
+        />
+      </View>
       <Row title="Decline the call">
         <Switch value={s.callDecline} onValueChange={v => set({callDecline: v})} />
       </Row>
@@ -242,6 +286,8 @@ const st = StyleSheet.create({
   input: {color: '#FFFFFF', backgroundColor: '#1D1D2B', borderRadius: 12, padding: 12, marginTop: 6, minHeight: 70, textAlignVertical: 'top'},
   notes: {color: '#D8DAE0', marginTop: 12, lineHeight: 20},
   skill: {flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#161622', borderRadius: 12, padding: 12, marginBottom: 8},
+  secRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6},
+  secInput: {color: '#FFFFFF', backgroundColor: '#1D1D2B', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, minWidth: 80, textAlign: 'center', fontSize: 16},
   input1: {color: '#FFFFFF', backgroundColor: '#1D1D2B', borderRadius: 12, padding: 12, marginTop: 8},
   add: {marginTop: 12, alignSelf: 'flex-start'},
   reset: {marginTop: 28, alignSelf: 'flex-start'},

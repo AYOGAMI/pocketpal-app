@@ -1,4 +1,6 @@
 import React, {useState, useEffect, useRef, useContext} from 'react';
+import {Modal as AModal, Pressable as APressable, Text as AText, View as AView} from 'react-native';
+import AssistSettings from '../../assistant/AssistSettings';
 import {
   View,
   Platform,
@@ -103,7 +105,7 @@ const languageName = (code: string): string =>
     ? languageDisplayNames[code as AvailableLanguage]
     : code.toUpperCase();
 
-export const SettingsScreen: React.FC = observer(() => {
+const SettingsScreenBase: React.FC = observer(() => {
   const l10n = useContext(L10nContext);
   const theme = useTheme();
   const styles = createStyles(theme);
@@ -1757,3 +1759,38 @@ export const SettingsScreen: React.FC = observer(() => {
     </SafeAreaView>
   );
 });
+
+// Assistant: voice, skills, call helper, persona and conversation settings live on their own page.
+export const SettingsScreen: React.FC = () => {
+  const [assistOpen, setAssistOpen] = useState(false);
+  return (
+    <AView style={{flex: 1}}>
+      <AView style={{flex: 1}}>
+        <SettingsScreenBase />
+      </AView>
+      <APressable
+        onPress={() => setAssistOpen(true)}
+        style={{
+          backgroundColor: '#7C5CFF',
+          marginHorizontal: 16,
+          marginVertical: 10,
+          paddingVertical: 14,
+          paddingHorizontal: 18,
+          borderRadius: 16,
+        }}>
+        <AText style={{color: '#FFFFFF', fontSize: 16, fontWeight: '700'}}>Assistant settings</AText>
+        <AText style={{color: '#E4DCFF', fontSize: 12, marginTop: 2}}>
+          Voice, skills, call helper, persona, conversation, battery
+        </AText>
+      </APressable>
+      <AModal visible={assistOpen} animationType="slide" onRequestClose={() => setAssistOpen(false)}>
+        <AView style={{flex: 1, backgroundColor: '#0F0F17'}}>
+          <APressable onPress={() => setAssistOpen(false)} style={{paddingHorizontal: 20, paddingTop: 44, paddingBottom: 6}}>
+            <AText style={{color: '#FFFFFF', fontSize: 17}}>{'\u2039 Back'}</AText>
+          </APressable>
+          <AssistSettings />
+        </AView>
+      </AModal>
+    </AView>
+  );
+};

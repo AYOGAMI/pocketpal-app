@@ -12,7 +12,7 @@ import {
   View,
 } from 'react-native';
 
-import {asrStore, modelStore, ttsStore} from '../store';
+import {asrStore, modelStore, palStore, ttsStore} from '../store';
 import {whisperAsrEngine} from '../services/asr';
 import {ttsRuntime} from '../services/tts';
 
@@ -30,6 +30,8 @@ type Msg = {role: 'user' | 'assistant'; content: string};
 
 // ---------------------------------------------------------------- loading and unloading
 let S: AssistSettingsT = DEFAULTS;
+let PERSONA = '';
+const unloadEach = () => S.unloadAfterAnswer && !(S.conversation === 'continuous' && S.keepModel);
 let sessionOver = false;
 let assistActive = false;
 let baselineCtx = false;
@@ -408,8 +410,36 @@ async function complete(messages: any[], maxTokens: number): Promise<string> {
     .trim();
 }
 
+async function personaText(): Promise<string> {
+  if (!S.personaId || S.personaId === 'default') {
+    return '';
+  }
+  try {
+    await Promise.race([(palStore as any).ready, sleep(4000)]);
+  } catch (_e) {
+    // use what is loaded
+  }
+  const pal: any = ((palStore as any).pals ?? []).find((p: any) => p.id === S.personaId);
+  if (!pal) {
+    return '';
+  }
+  const params = pal.parameters ?? {};
+  return String(pal.systemPrompt ?? '')
+    .replace(/\{\{\s*(\w+)\s*\}\}/g, (_m: string, k: string) => String(params[k] ?? ''))
+    .replace(/\{(\w+)\}/g, (m: string, k: string) => (params[k] !== undefined ? String(params[k]) : m))
+    .trim()
+    .slice(0, 700);
+}
+
 const askLlm = (history: Msg[], text: string) =>
-  complete([{role: 'system', content: SYSTEM}, ...history.slice(-6), {role: 'user', content: text}], 160);
+  complete(
+    [
+      {role: 'system', content: (PERSONA ? 'Your personality and role: ' + PERSONA + '\n\n' : '') + SYSTEM},
+      ...history.slice(S.conversation === 'continuous' ? -12 : -6),
+      {role: 'user', content: text},
+    ],
+    160,
+  );
 
 async function writeEmail(to: string, topic: string): Promise<{subject: string; body: string}> {
   const prompt =
@@ -444,7 +474,7 @@ async function summarise(kind: 'screen' | 'notifications', text: string): Promis
   try {
     out = await complete([{role: 'user', content: prompt}], 150);
   } finally {
-    if (S.unloadAfterAnswer) {
+    if (unloadEach()) {
       await offloadModel();
     }
   }
@@ -715,6 +745,7 @@ export default function AssistRoot() {
       }
       setPh('starting');
       S = await loadSettings();
+      PERSONA = await personaText();
       setShade(S.showShade);
       setGlow(S.showGlow);
       setSize(S.cloudSize);
@@ -742,7 +773,7 @@ export default function AssistRoot() {
         setPh('listening');
         setHeard('');
         const warm = loadWhisper(tier).catch(() => {}); // loads while you speak
-        const pcm: string = await N.listen(14000, S.silenceMs, first ? 8000 : 6000);
+        const pcm: string = await N.listen(14000, S.silenceMs, first ? 8000 : S.conversation === 'continuous' ? S.idleSeconds * 1000 : 6000);
         if (!alive.current) {
           return;
         }
@@ -800,7 +831,7 @@ export default function AssistRoot() {
                   160,
                 );
               } finally {
-                if (S.unloadAfterAnswer) {
+                if (unloadEach()) {
                   await offloadModel();
                 }
               }
@@ -878,7 +909,7 @@ export default function AssistRoot() {
               spoken = out.replace(/ACTION[\s\S]*/g, '').trim() || 'Sorry, I did not get that.';
             }
           }
-          if (!(act && act.a === 'email') && S.unloadAfterAnswer) {
+          if (!(act && act.a === 'email') && unloadEach()) {
             await offloadModel();
           }
         }
@@ -899,7 +930,7 @@ export default function AssistRoot() {
             return;
           }
           const mail = await writeEmail(act.to ?? '', act.topic);
-          if (S.unloadAfterAnswer) {
+          if (unloadEach()) {
             await offloadModel();
           }
           act = {a: 'email', to: act.to ?? '', subject: mail.subject, body: mail.body};
@@ -931,7 +962,7 @@ export default function AssistRoot() {
         }
         history.push({role: 'user', content: text}, {role: 'assistant', content: spoken});
         await say(spoken);
-        if (!S.followUp) {
+        if (S.conversation === 'one') {
           await finish();
           return;
         }
