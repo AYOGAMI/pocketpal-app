@@ -3,6 +3,7 @@ package com.pocketpal
 import android.Manifest
 import android.app.Notification
 import android.app.SearchManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -42,6 +43,33 @@ import kotlin.math.sqrt
 class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJavaModule(rc) {
 
     override fun getName(): String = "AssistNative"
+
+    init {
+        try {
+            val prev = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { t, e ->
+                try { saveCrash("App crash in thread " + t.name + "\n" + android.util.Log.getStackTraceString(e)) } catch (_: Exception) {}
+                prev?.uncaughtException(t, e)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    // Saves crash details as Download/pocketpal-crash-*.txt (read it from Termux with: cat ~/storage/downloads/pocketpal-crash-*.txt)
+    private fun saveCrash(text: String) {
+        if (Build.VERSION.SDK_INT < 29) return
+        val v = ContentValues()
+        v.put(MediaStore.MediaColumns.DISPLAY_NAME, "pocketpal-crash-" + System.currentTimeMillis() + ".txt")
+        v.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+        v.put(MediaStore.MediaColumns.RELATIVE_PATH, "Download")
+        val uri = rc.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v) ?: return
+        rc.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
+    }
+
+    @ReactMethod
+    fun writeCrash(text: String) {
+        Thread { try { saveCrash(text) } catch (_: Exception) {} }.start()
+    }
 
     @ReactMethod fun addListener(eventName: String) {}
     @ReactMethod fun removeListeners(count: Int) {}

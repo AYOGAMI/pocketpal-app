@@ -23,6 +23,27 @@ import {AssistSettingsT, DEFAULTS, SkillT, loadSettings} from './settingsShared'
 // or answers with the on-device model. Every model is unloaded as soon as it is not needed.
 
 const N: any = (NativeModules as any).AssistNative;
+
+// Saves fatal app errors to the Downloads folder (pocketpal-crash-*.txt) so they can be read from Termux.
+try {
+  const EU: any = (global as any).ErrorUtils;
+  if (EU && !(global as any).__pp_crash_logger) {
+    (global as any).__pp_crash_logger = true;
+    const prevHandler = EU.getGlobalHandler?.();
+    EU.setGlobalHandler((e: any, fatal?: boolean) => {
+      try {
+        N?.writeCrash('JS error (fatal=' + fatal + ')\n' + String(e?.stack ?? e?.message ?? e));
+      } catch (_x) {
+        // ignore
+      }
+      if (prevHandler) {
+        prevHandler(e, fatal);
+      }
+    });
+  }
+} catch (_e) {
+  // ignore
+}
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 type Phase = 'starting' | 'listening' | 'thinking' | 'speaking';
