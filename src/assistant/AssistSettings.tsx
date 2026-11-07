@@ -217,7 +217,7 @@ export default function AssistSettings() {
       <Section title="My skills" />
       <Text style={st.note}>
         Teach the assistant your own commands. Example: phrases "open my bank", does "Open an app", value "MyBank". Or phrases
-        "search amazon for", does "Open a web link", value https://www.amazon.com/s?k={q}
+        "search amazon for", does "Open a web link", value https://www.amazon.com/s?k={'{q}'}
       </Text>
       {(s.skills ?? []).map(sk => (
         <View key={sk.id} style={st.skill}>

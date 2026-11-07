@@ -28,7 +28,14 @@ jobs:
           java-version: 17
       - name: Install JS packages
         run: yarn install --frozen-lockfile || yarn install
+      - name: Restore the signing key
+        id: ks
+        uses: actions/cache@v4
+        with:
+          path: ~/pp.jks
+          key: pp-keystore-v1
       - name: Make a signing key
+        if: steps.ks.outputs.cache-hit != 'true'
         run: keytool -genkeypair -v -keystore $HOME/pp.jks -alias pp -keyalg RSA -keysize 2048 -validity 10000 -storepass ppbuild123 -keypass ppbuild123 -dname "CN=PocketPal Build"
       - name: Build the APK (phone chip only)
         working-directory: android
