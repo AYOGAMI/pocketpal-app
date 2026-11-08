@@ -30,6 +30,17 @@ export type AssistSettingsT = {
   callSmsText: string;
   callNote: boolean;
   callNotify: boolean;
+  callOnMissed: boolean; // also text callers who hang up before the wait is over
+  callAlways: boolean; // start the helper again after the phone restarts
+  callMode: 'text' | 'answer'; // text = decline and text, answer = experimental AI answers the call
+  callGreeting: string;
+  callTurns: number;
+  smsAgent: boolean; // the AI keeps texting the caller to get details
+  smsMaxReplies: number;
+  smsDetails: string;
+  circleOnOpen: boolean;
+  circleTarget: 'ask' | 'lens' | 'chooser' | 'save';
+  circlePackage: string;
 };
 
 export const DEFAULTS: AssistSettingsT = {
@@ -53,6 +64,17 @@ export const DEFAULTS: AssistSettingsT = {
   callSmsText: "Hi, I'm busy right now. Please text me who you are and what it's about, and I'll get back to you.",
   callNote: true,
   callNotify: true,
+  callOnMissed: true,
+  callAlways: true,
+  callMode: 'text',
+  callGreeting: "Hello, this is the phone assistant. The owner can't take your call right now. Please say your name and why you are calling.",
+  callTurns: 2,
+  smsAgent: true,
+  smsMaxReplies: 3,
+  smsDetails: "their name, why they called, how urgent it is, and the best number to call back",
+  circleOnOpen: false,
+  circleTarget: 'ask',
+  circlePackage: '',
 };
 
 const N: any = (NativeModules as any).AssistNative;

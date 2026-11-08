@@ -3,9 +3,10 @@ package com.pocketpal
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
 import android.provider.Telephony
 
-// Catches the caller's text reply and saves the reason in your notes.
+// Catches the caller's text reply. With the AI conversation on, the AI answers and asks for details.
 class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         try {
@@ -20,14 +21,27 @@ class SmsReceiver : BroadcastReceiver() {
                 val key = addr.filter { it.isDigit() }.takeLast(9)
                 val t = prefs.getLong("p_$key", 0L)
                 if (t == 0L || System.currentTimeMillis() - t > 3 * 60 * 60 * 1000L) continue
+                HelperLog.add(context, "Text received from $addr")
                 val who = prefs.getString("n_$key", addr) ?: addr
-                val reason = body.toString().trim().replace(Regex("\\s+"), " ").take(240)
-                val line = "Reason from $who: $reason"
-                if (AssistSettings.bool(context, "callNote", true)) AssistNotes.add(context, line)
-                if (AssistSettings.bool(context, "callNotify", true)) CallNotice.post(context, "Why they called", line)
-                prefs.edit().remove("p_$key").remove("n_$key").apply()
+                val text = body.toString().trim().replace(Regex("\\s+"), " ").take(400)
+                if (AssistSettings.bool(context, "smsAgent", true)) {
+                    prefs.edit().putLong("p_$key", System.currentTimeMillis()).apply()
+                    val b = Bundle()
+                    b.putString("number", addr)
+                    b.putString("who", who)
+                    b.putString("text", text)
+                    HelperLog.add(context, "Handing the reply to the AI")
+                    AgentLauncher.start(context, "PocketPalSmsAgent", b)
+                } else {
+                    val line = "Reason from $who: " + text.take(240)
+                    if (AssistSettings.bool(context, "callNote", true)) AssistNotes.add(context, line)
+                    if (AssistSettings.bool(context, "callNotify", true)) CallNotice.post(context, "Why they called", line)
+                    HelperLog.add(context, "Saved the caller's reason to notes")
+                    prefs.edit().remove("p_$key").remove("n_$key").apply()
+                }
             }
         } catch (e: Exception) {
+            HelperLog.add(context, "Text handling problem: " + e.message)
         }
     }
 }

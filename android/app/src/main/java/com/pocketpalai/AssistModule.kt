@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
+import android.graphics.Bitmap
+import android.telephony.SmsManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioAttributes
@@ -83,6 +85,7 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
 
     // ------------------------------------------------------------ microphone
     @Volatile private var stopRequested = false
+    @Volatile private var lastMaxRms = 0.0
 
     @ReactMethod
     fun stopListening() {
@@ -117,6 +120,7 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                     return@Thread
                 }
                 stopRequested = false
+                lastMaxRms = 0.0
                 rec.startRecording()
                 val out = ByteArrayOutputStream()
                 val pre = java.util.ArrayDeque<ShortArray>()
@@ -134,6 +138,7 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                     for (i in 0 until r) sum += frame[i].toDouble() * frame[i].toDouble()
                     val rms = sqrt(sum / r)
                     elapsed += 20
+                    if (rms > lastMaxRms) lastMaxRms = rms
                     if ((elapsed / 20) % 3 == 0) emitLevel(minOf(1.0, rms / 4000.0))
                     if (n < 15) {
                         floor += rms
@@ -397,6 +402,8 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
             "sound" -> Pair(Settings.ACTION_SOUND_SETTINGS, "Opening sound settings.")
             "display" -> Pair(Settings.ACTION_DISPLAY_SETTINGS, "Opening display settings.")
             "notification_access" -> Pair("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS", "Turn on PocketPal in notification access, then ask me again.")
+            "battery" -> Pair(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS, "Find PocketPal in the list and choose do not optimize, so the call helper keeps running.")
+            "accessibility" -> Pair(Settings.ACTION_ACCESSIBILITY_SETTINGS, "Turn on PocketPal in accessibility, then come back.")
             "assistant" -> Pair(Settings.ACTION_VOICE_INPUT_SETTINGS, "Open the default assistant settings and turn on use text from screen.")
             else -> Pair(Settings.ACTION_SETTINGS, "Opening settings.")
         }
@@ -506,6 +513,218 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
         promise.resolve(true)
     }
 
+    // ------------------------------------------------------------ agents: calls, texts, screenshots
+    @ReactMethod
+    fun getLastLevel(promise: Promise) {
+        promise.resolve(lastMaxRms)
+    }
+
+    @ReactMethod
+    fun helperLog(msg: String) {
+        HelperLog.add(rc, "[AI] " + msg)
+    }
+
+    @ReactMethod
+    fun accessibilityOn(promise: Promise) {
+        promise.resolve(AssistAccessibilityService.instance != null)
+    }
+
+    @ReactMethod
+    fun isRinging(promise: Promise) {
+        try {
+            val t = rc.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+            promise.resolve(t.callState == android.telephony.TelephonyManager.CALL_STATE_RINGING)
+        } catch (e: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun answerCall(promise: Promise) {
+        try {
+            val tc = rc.getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager
+            tc.acceptRingingCall()
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                try {
+                    val am = rc.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    am.isSpeakerphoneOn = true
+                    HelperLog.add(rc, "Call answered, speakerphone on")
+                } catch (e: Exception) {
+                    HelperLog.add(rc, "Speakerphone failed: " + e.message)
+                }
+                promise.resolve(true)
+            }, 1500)
+        } catch (e: Exception) {
+            HelperLog.add(rc, "Could not answer the call: " + e.message)
+            promise.resolve(false)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    @ReactMethod
+    fun endCallNow(promise: Promise) {
+        try {
+            val tc = rc.getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager
+            val done = tc.endCall()
+            try {
+                val am = rc.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                am.isSpeakerphoneOn = false
+            } catch (e: Exception) {
+            }
+            HelperLog.add(rc, if (done) "Call ended" else "Android refused to end the call")
+            promise.resolve(done)
+        } catch (e: Exception) {
+            HelperLog.add(rc, "Could not end the call: " + e.message)
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun sendSms(number: String, text: String, promise: Promise) {
+        try {
+            val sms: SmsManager = if (Build.VERSION.SDK_INT >= 31) rc.getSystemService(SmsManager::class.java) else SmsManager.getDefault()
+            sms.sendMultipartTextMessage(number, null, sms.divideMessage(text), null, null)
+            HelperLog.add(rc, "Text sent")
+            promise.resolve(true)
+        } catch (e: Exception) {
+            HelperLog.add(rc, "Text failed: " + e.message)
+            promise.resolve(false)
+        }
+    }
+
+    private fun threadKey(number: String): String = number.filter { it.isDigit() }.takeLast(9)
+
+    @ReactMethod
+    fun getSmsThread(number: String, promise: Promise) {
+        promise.resolve(rc.getSharedPreferences("assist_calls", Context.MODE_PRIVATE).getString("t_" + threadKey(number), "") ?: "")
+    }
+
+    @ReactMethod
+    fun saveSmsThread(number: String, json: String, promise: Promise) {
+        rc.getSharedPreferences("assist_calls", Context.MODE_PRIVATE).edit().putString("t_" + threadKey(number), json).apply()
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun clearSmsThread(number: String, promise: Promise) {
+        val k = threadKey(number)
+        rc.getSharedPreferences("assist_calls", Context.MODE_PRIVATE).edit().remove("t_$k").remove("p_$k").remove("n_$k").apply()
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun postNotice(title: String, text: String) {
+        CallNotice.post(rc, title, text)
+    }
+
+    private fun saveBitmap(bmp: Bitmap, name: String): String? {
+        return try {
+            val f = java.io.File(rc.cacheDir, name)
+            java.io.FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            f.absolutePath
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // waits a moment for the screenshot Android hands the assistant, then gives its file path
+    @ReactMethod
+    fun getScreenshotPath(promise: Promise) {
+        Thread {
+            var waited = 0
+            while (PocketScreen.shot == null && waited < 3000) {
+                Thread.sleep(100)
+                waited += 100
+            }
+            val b = PocketScreen.shot
+            promise.resolve(if (b == null) "" else (saveBitmap(b, "assist_shot.png") ?: ""))
+        }.start()
+    }
+
+    @ReactMethod
+    fun cropShot(fx: Double, fy: Double, fw: Double, fh: Double, promise: Promise) {
+        try {
+            val b = PocketScreen.shot
+            if (b == null) {
+                promise.resolve("")
+                return
+            }
+            val x = (fx.coerceIn(0.0, 0.98) * b.width).toInt()
+            val y = (fy.coerceIn(0.0, 0.98) * b.height).toInt()
+            var w = (fw * b.width).toInt().coerceAtLeast(60)
+            var h = (fh * b.height).toInt().coerceAtLeast(60)
+            if (x + w > b.width) w = b.width - x
+            if (y + h > b.height) h = b.height - y
+            val c = Bitmap.createBitmap(b, x, y, w, h)
+            promise.resolve(saveBitmap(c, "assist_crop.png") ?: "")
+        } catch (e: Exception) {
+            promise.resolve("")
+        }
+    }
+
+    private fun toGallery(path: String, name: String): Uri? {
+        if (Build.VERSION.SDK_INT < 29) return null
+        val bmp = android.graphics.BitmapFactory.decodeFile(path) ?: return null
+        val v = ContentValues()
+        v.put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+        v.put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+        v.put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/PocketPal")
+        val uri = rc.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v) ?: return null
+        rc.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        return uri
+    }
+
+    @ReactMethod
+    fun saveImage(path: String, promise: Promise) {
+        promise.resolve(toGallery(path, "pocketpal-" + System.currentTimeMillis() + ".png") != null)
+    }
+
+    // sends the picture to Google Lens (or any app you choose)
+    @ReactMethod
+    fun shareImage(path: String, pkg: String, promise: Promise) {
+        val u = toGallery(path, "pocketpal-" + System.currentTimeMillis() + ".png")
+        if (u == null) {
+            promise.resolve(false)
+            return
+        }
+        val i = Intent(Intent.ACTION_SEND)
+        i.type = "image/png"
+        i.putExtra(Intent.EXTRA_STREAM, u)
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (pkg.isNotBlank()) {
+            i.setPackage(pkg)
+            if (start(i)) {
+                promise.resolve(true)
+                return
+            }
+            i.setPackage(null)
+        }
+        promise.resolve(start(Intent.createChooser(i, "Search or share with")))
+    }
+
+    @ReactMethod
+    fun takeScreenshotNow(promise: Promise) {
+        val svc = AssistAccessibilityService.instance
+        if (svc != null && Build.VERSION.SDK_INT >= 28) {
+            rc.currentActivity?.finish()
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                try {
+                    svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
+                } catch (e: Exception) {
+                }
+            }, 800)
+            promise.resolve(true)
+            return
+        }
+        val b = PocketScreen.shot
+        if (b == null) {
+            promise.resolve(false)
+            return
+        }
+        val p = saveBitmap(b, "assist_full.png")
+        promise.resolve(if (p != null) toGallery(p, "screenshot-" + System.currentTimeMillis() + ".png") != null else false)
+    }
+
     // ------------------------------------------------------------ settings + call helper
     @ReactMethod
     fun getSettings(promise: Promise) {
@@ -516,6 +735,41 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
     fun setSettings(json: String, promise: Promise) {
         rc.getSharedPreferences("assist_prefs", Context.MODE_PRIVATE).edit().putString("json", json).apply()
         promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun getHelperLog(promise: Promise) {
+        promise.resolve(HelperLog.get(rc))
+    }
+
+    @ReactMethod
+    fun clearHelperLog(promise: Promise) {
+        HelperLog.clear(rc)
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun callHelperStatus(promise: Promise) {
+        val sb = StringBuilder()
+        sb.append("Helper running: ").append(if (CallHelperService.running) "yes" else "no").append("\n")
+        val names = linkedMapOf(
+            Manifest.permission.READ_PHONE_STATE to "Phone state",
+            Manifest.permission.ANSWER_PHONE_CALLS to "Decline calls",
+            Manifest.permission.READ_CALL_LOG to "Call log (caller number)",
+            Manifest.permission.SEND_SMS to "Send texts",
+            Manifest.permission.RECEIVE_SMS to "Read replies",
+            Manifest.permission.READ_CONTACTS to "Contacts (names)"
+        )
+        for ((perm, label) in names) {
+            val g = ContextCompat.checkSelfPermission(rc, perm) == PackageManager.PERMISSION_GRANTED
+            sb.append(if (g) "OK  " else "MISSING  ").append(label).append("\n")
+        }
+        try {
+            val pm = rc.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            sb.append(if (pm.isIgnoringBatteryOptimizations(rc.packageName)) "OK  " else "RESTRICTED  ").append("Runs in the background without battery limits\n")
+        } catch (e: Exception) {
+        }
+        promise.resolve(sb.toString())
     }
 
     @ReactMethod
@@ -530,6 +784,7 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
 
     private fun callHelperImpl(on: Boolean): String {
         if (!on) {
+            rc.getSharedPreferences("assist_calls", Context.MODE_PRIVATE).edit().putBoolean("enabled", false).apply()
             rc.stopService(Intent(rc, CallHelperService::class.java))
             ok = true
             return "Call helper is off."

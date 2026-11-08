@@ -24,3 +24,23 @@ object AssistNotes {
         p.edit().putString("all", old + stamp + " - " + text.trim() + "\n").apply()
     }
 }
+
+// A short diary of what the call helper did, shown in the settings screen.
+object HelperLog {
+    fun add(ctx: Context, msg: String) {
+        try {
+            val p = ctx.getSharedPreferences("assist_calls", Context.MODE_PRIVATE)
+            val stamp = java.text.SimpleDateFormat("d MMM HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+            val old = p.getString("log", "") ?: ""
+            val lines = (old + stamp + "  " + msg + "\n").lines().filter { it.isNotBlank() }.takeLast(80)
+            p.edit().putString("log", lines.joinToString("\n") + "\n").apply()
+        } catch (e: Exception) {
+        }
+    }
+
+    fun get(ctx: Context): String = ctx.getSharedPreferences("assist_calls", Context.MODE_PRIVATE).getString("log", "") ?: ""
+
+    fun clear(ctx: Context) {
+        ctx.getSharedPreferences("assist_calls", Context.MODE_PRIVATE).edit().remove("log").apply()
+    }
+}

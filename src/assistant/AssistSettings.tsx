@@ -45,6 +45,8 @@ export default function AssistSettings() {
   const [helperOn, setHelperOn] = useState(false);
   const [notes, setNotes] = useState('');
   const [secText, setSecText] = useState('20');
+  const [diag, setDiag] = useState('');
+  const [a11y, setA11y] = useState(false);
   const [draft, setDraft] = useState<{name: string; phrases: string; type: SkillT['type']; value: string}>({
     name: '',
     phrases: '',
@@ -60,6 +62,7 @@ export default function AssistSettings() {
     N?.callHelperRunning().then(setHelperOn).catch(() => {});
     const t = setInterval(() => {
       N?.callHelperRunning().then(setHelperOn).catch(() => {});
+      N?.accessibilityOn().then(setA11y).catch(() => {});
       const list: any[] = (modelStore as any).models ?? [];
       setModels(list.filter(m => m.isDownloaded).map(m => ({id: m.id, name: m.name ?? m.id})));
       const pl: any[] = (palStore as any).pals ?? [];
@@ -199,6 +202,58 @@ export default function AssistSettings() {
           }}
         />
       </View>
+      <Row title="Also handle callers who hang up first" hint="If the caller gives up before the wait is over, still text them and save a note.">
+        <Switch value={s.callOnMissed} onValueChange={v => set({callOnMissed: v})} />
+      </Row>
+      <Row title="Keep the helper on" hint="Starts it again after the phone restarts. Also allow background running so Android does not stop it.">
+        <Switch value={s.callAlways} onValueChange={v => set({callAlways: v})} />
+      </Row>
+      <View style={st.btnRow}>
+        <Pressable style={st.btn} onPress={() => N.perform('settings', JSON.stringify({page: 'battery'}))}>
+          <Text style={st.btnText}>Allow background running</Text>
+        </Pressable>
+        <Pressable style={st.btn} onPress={async () => setDiag(String(await N.callHelperStatus()))}>
+          <Text style={st.btnText}>Check permissions</Text>
+        </Pressable>
+      </View>
+      <View style={[st.btnRow, {marginTop: 10}]}>
+        <Pressable style={st.btn} onPress={async () => setDiag(String((await N.getHelperLog()) || 'The helper log is empty. Nothing has happened yet.'))}>
+          <Text style={st.btnText}>Show helper log</Text>
+        </Pressable>
+        <Pressable style={st.btn} onPress={async () => { await N.clearHelperLog(); setDiag('Log cleared.'); }}>
+          <Text style={st.btnText}>Clear log</Text>
+        </Pressable>
+      </View>
+      {!!diag && <Text style={st.notes}>{diag}</Text>}
+      <Row title="When a call is ignored" hint="Decline and text is reliable. Answer and talk is experimental: the AI answers, speaks through the speaker and listens through the microphone. It may not hear the caller on some phones.">
+        <Chips options={[['Decline and text', 'text'], ['Answer and talk (experimental)', 'answer']]} value={s.callMode} onPick={v => set({callMode: v})} />
+      </Row>
+      {s.callMode === 'answer' && (
+        <>
+          <Text style={st.hint}>What the AI says first</Text>
+          <TextInput style={st.input} multiline value={s.callGreeting} onChangeText={v => set({callGreeting: v})} placeholderTextColor="#777" />
+          <Row title="Questions it asks" hint="How many times it listens and replies before saying goodbye.">
+            <Chips options={[['1', 1], ['2', 2], ['3', 3], ['4', 4]]} value={s.callTurns} onPick={v => set({callTurns: v})} />
+          </Row>
+          <Row title={a11y ? 'Accessibility service is ON' : 'Accessibility service is OFF'} hint="Needed so the microphone works during a call. Open it, find PocketPal, and turn it on. On newer Android, first allow restricted settings in PocketPal's app info.">
+            <Pressable style={[st.btn, a11y && st.btnOn]} onPress={() => N.perform('settings', JSON.stringify({page: 'accessibility'}))}>
+              <Text style={st.btnText}>Open</Text>
+            </Pressable>
+          </Row>
+        </>
+      )}
+      <Row title="AI keeps texting the caller" hint="When a caller texts back, the AI replies, asks for missing details, and saves a short note when it has them.">
+        <Switch value={s.smsAgent} onValueChange={v => set({smsAgent: v})} />
+      </Row>
+      {s.smsAgent && (
+        <>
+          <Row title="Most replies per caller">
+            <Chips options={[['1', 1], ['2', 2], ['3', 3], ['5', 5]]} value={s.smsMaxReplies} onPick={v => set({smsMaxReplies: v})} />
+          </Row>
+          <Text style={st.hint}>Details the AI should find out</Text>
+          <TextInput style={st.input} multiline value={s.smsDetails} onChangeText={v => set({smsDetails: v})} placeholderTextColor="#777" />
+        </>
+      )}
       <Row title="Decline the call">
         <Switch value={s.callDecline} onValueChange={v => set({callDecline: v})} />
       </Row>
@@ -212,6 +267,25 @@ export default function AssistSettings() {
       </Row>
       <Row title="Show a notification with the reason">
         <Switch value={s.callNotify} onValueChange={v => set({callNotify: v})} />
+      </Row>
+
+      <Section title="Circle to search and screenshots" />
+      <Text style={st.note}>
+        Say "circle to search" or "search this". Your screen appears, you draw a circle, and the picture goes where you choose. Say
+        "take a screenshot" to save the screen. Both need "use screenshot" turned on in Android's default assistant settings.
+      </Text>
+      <Row title="Open circle to search straight away" hint="Instead of listening, the assistant shows your screen to circle.">
+        <Switch value={s.circleOnOpen} onValueChange={v => set({circleOnOpen: v})} />
+      </Row>
+      <Row title="After circling">
+        <Chips options={[['Ask me', 'ask'], ['Google Lens', 'lens'], ['Choose app', 'chooser'], ['Save', 'save']]} value={s.circleTarget} onPick={v => set({circleTarget: v})} />
+      </Row>
+      <Text style={st.hint}>Always send to this app (optional, the app's package name)</Text>
+      <TextInput style={st.input1} placeholder="for example com.google.android.googlequicksearchbox" placeholderTextColor="#777" value={s.circlePackage} onChangeText={v => set({circlePackage: v.trim()})} />
+      <Row title="Use screenshot setting" hint="Open Android's default assistant settings and turn on use screenshot and use text from screen.">
+        <Pressable style={st.btn} onPress={() => N.perform('settings', JSON.stringify({page: 'assistant'}))}>
+          <Text style={st.btnText}>Open</Text>
+        </Pressable>
       </Row>
 
       <Section title="My skills" />

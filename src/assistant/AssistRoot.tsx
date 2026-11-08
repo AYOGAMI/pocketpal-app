@@ -3,9 +3,12 @@ import {
   Animated,
   AppState,
   BackHandler,
+  Dimensions,
   Easing,
+  Image,
   NativeEventEmitter,
   NativeModules,
+  PanResponder,
   Pressable,
   StyleSheet,
   Text,
@@ -291,6 +294,12 @@ function ruleIntent(raw: string): any | null {
   ) {
     return {a: 'email', to: (m[1] ?? '').trim(), topic: (m[2] ?? '').trim()};
   }
+  if (/take (a )?(screen ?shot|screen shot)|^screen ?shot$|capture (the |my )?screen/.test(t)) {
+    return {a: 'screenshot'};
+  }
+  if (/circle (to )?search|(search|lens|identify|what is) (this|that|what s) (on|in) (my |the )?screen|search (this|that)$|google lens/.test(t)) {
+    return {a: 'circle'};
+  }
   if (/(unload|offload|free up|free) (the )?(model|memory|ai)|turn off (the )?(model|ai)/.test(t)) {
     return {a: 'unload'};
   }
@@ -510,6 +519,87 @@ const FIRST_LINES = (txt: string, n: number) =>
     .slice(0, n)
     .join('. ');
 
+// ---------------------------------------------------------------- circle to search
+const SCREEN = Dimensions.get('screen');
+type Box = {x: number; y: number; w: number; h: number};
+
+const CircleLayer: React.FC<{uri: string; target: string; onResult: (box: Box | null, target: string) => void}> = ({uri, target, onResult}) => {
+  const [pts, setPts] = useState<Array<{x: number; y: number}>>([]);
+  const [box, setBox] = useState<Box | null>(null);
+  const ref = useRef<Array<{x: number; y: number}>>([]);
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: e => {
+        ref.current = [{x: e.nativeEvent.pageX, y: e.nativeEvent.pageY}];
+        setPts([...ref.current]);
+        setBox(null);
+      },
+      onPanResponderMove: e => {
+        const p = {x: e.nativeEvent.pageX, y: e.nativeEvent.pageY};
+        const last = ref.current[ref.current.length - 1];
+        if (Math.hypot(p.x - last.x, p.y - last.y) > 10) {
+          ref.current.push(p);
+          setPts([...ref.current]);
+        }
+      },
+      onPanResponderRelease: () => {
+        const a = ref.current;
+        if (a.length < 4) {
+          return;
+        }
+        const xs = a.map(p => p.x);
+        const ys = a.map(p => p.y);
+        const pad = 28;
+        const x = Math.max(0, Math.min(...xs) - pad);
+        const y = Math.max(0, Math.min(...ys) - pad);
+        const b: Box = {
+          x,
+          y,
+          w: Math.min(SCREEN.width - x, Math.max(...xs) - x + pad),
+          h: Math.min(SCREEN.height - y, Math.max(...ys) - y + pad),
+        };
+        setBox(b);
+        if (target !== 'ask') {
+          onResult(b, target);
+        }
+      },
+    }),
+  ).current;
+  return (
+    <View style={styles.circleRoot} {...pan.panHandlers}>
+      <Image source={{uri}} style={{position: 'absolute', width: SCREEN.width, height: SCREEN.height}} resizeMode="stretch" />
+      <View pointerEvents="none" style={styles.circleDim} />
+      {pts.map((p, i) => (
+        <View key={i} pointerEvents="none" style={[styles.circleDot, {left: p.x - 6, top: p.y - 6}]} />
+      ))}
+      {box && (
+        <View pointerEvents="none" style={[styles.circleBox, {left: box.x, top: box.y, width: box.w, height: box.h}]} />
+      )}
+      <View style={styles.circleBar}>
+        {!box && <Text style={styles.circleHint}>Draw a circle around what you want to search</Text>}
+        {box && target === 'ask' && (
+          <View style={styles.circleBtns}>
+            <Pressable style={styles.circleBtn} onPress={() => onResult(box, 'lens')}>
+              <Text style={styles.circleBtnText}>Google Lens</Text>
+            </Pressable>
+            <Pressable style={styles.circleBtn} onPress={() => onResult(box, 'chooser')}>
+              <Text style={styles.circleBtnText}>Choose app</Text>
+            </Pressable>
+            <Pressable style={styles.circleBtn} onPress={() => onResult(box, 'save')}>
+              <Text style={styles.circleBtnText}>Save</Text>
+            </Pressable>
+          </View>
+        )}
+        <Pressable style={styles.circleCancel} onPress={() => onResult(null, 'cancel')}>
+          <Text style={styles.circleBtnText}>Cancel</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+};
+
 // ---------------------------------------------------------------- the living cloud
 const BLOBS = [
   {size: 58, x: -30, y: 8, color: 'rgba(124,92,255,0.50)', dx: 7, dy: 5, dur: 2600},
@@ -614,6 +704,7 @@ export default function AssistRoot() {
   const [heard, setHeard] = useState('');
   const [reply, setReply] = useState('');
   const [hidden, setHidden] = useState(false);
+  const [circleUri, setCircleUri] = useState('');
   const [shade, setShade] = useState(true);
   const [glow, setGlow] = useState(true);
   const [size, setSize] = useState(1);
@@ -758,6 +849,37 @@ export default function AssistRoot() {
     }
   };
 
+  const circleFlow = async () => {
+    setPh('thinking');
+    const p: string = await N.getScreenshotPath();
+    if (!p) {
+      await say('I could not get the screen. In the default assistant settings, turn on use screenshot.');
+      await finish();
+      return;
+    }
+    setCircleUri('file://' + p);
+  };
+
+  const onCircleResult = async (box: Box | null, target: string) => {
+    setCircleUri('');
+    if (!box) {
+      await finish();
+      return;
+    }
+    acting.current = true;
+    const path: string = await N.cropShot(box.x / SCREEN.width, box.y / SCREEN.height, box.w / SCREEN.width, box.h / SCREEN.height);
+    if (path) {
+      if (target === 'save') {
+        await N.saveImage(path);
+      } else if (target === 'lens') {
+        await N.shareImage(path, 'com.google.android.googlequicksearchbox');
+      } else {
+        await N.shareImage(path, S.circlePackage || '');
+      }
+    }
+    await finish();
+  };
+
   async function run() {
     try {
       if (!N) {
@@ -789,6 +911,11 @@ export default function AssistRoot() {
       const history: Msg[] = [];
       let first = true;
       let pendingEmail: {to: string} | null = null;
+
+      if (S.circleOnOpen) {
+        await circleFlow();
+        return;
+      }
 
       while (alive.current) {
         setPh('listening');
@@ -829,7 +956,7 @@ export default function AssistRoot() {
           await finish();
           return;
         }
-        if (act && ['screen', 'notifs', 'note_add', 'notes_read', 'notes_clear', 'unload', 'skill_ai'].includes(act.a)) {
+        if (act && ['screen', 'notifs', 'note_add', 'notes_read', 'notes_clear', 'unload', 'skill_ai', 'screenshot', 'circle'].includes(act.a)) {
           const sp = act;
           act = null;
           setPh('thinking');
@@ -838,6 +965,18 @@ export default function AssistRoot() {
             await releaseAll();
             await say(spoken);
             await finish();
+            return;
+          }
+          if (sp.a === 'screenshot') {
+            acting.current = true;
+            await releaseAll();
+            await N.takeScreenshotNow();
+            await finish();
+            return;
+          }
+          if (sp.a === 'circle') {
+            await releaseAll();
+            await circleFlow();
             return;
           }
           if (sp.a === 'skill_ai') {
@@ -1000,6 +1139,9 @@ export default function AssistRoot() {
     phase === 'starting' ? 'Getting ready...' : phase === 'listening' ? 'Listening...' : phase === 'thinking' ? 'Thinking...' : '';
   const line = heard || hint;
 
+  if (circleUri) {
+    return <CircleLayer uri={circleUri} target={S.circleTarget} onResult={onCircleResult} />;
+  }
   if (hidden) {
     return <View style={styles.root} />;
   }
@@ -1059,6 +1201,16 @@ const styles = StyleSheet.create({
   },
   heard: {color: '#FFFFFF', fontSize: 16, fontWeight: '600', textAlign: 'center'},
   reply: {color: '#D8DAE0', fontSize: 14, marginTop: 6, textAlign: 'center', lineHeight: 20},
+  circleRoot: {flex: 1, backgroundColor: '#000'},
+  circleDim: {...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.28)'},
+  circleDot: {position: 'absolute', width: 12, height: 12, borderRadius: 6, backgroundColor: '#FFFFFF', borderWidth: 2, borderColor: '#7C5CFF'},
+  circleBox: {position: 'absolute', borderWidth: 3, borderColor: '#7C5CFF', borderRadius: 14},
+  circleBar: {position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', paddingBottom: 48, paddingTop: 16, backgroundColor: 'rgba(0,0,0,0.55)'},
+  circleHint: {color: '#FFFFFF', fontSize: 16, marginBottom: 10},
+  circleBtns: {flexDirection: 'row', gap: 10, marginBottom: 10},
+  circleBtn: {paddingHorizontal: 18, paddingVertical: 11, borderRadius: 20, backgroundColor: '#7C5CFF'},
+  circleCancel: {paddingHorizontal: 18, paddingVertical: 9, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.18)'},
+  circleBtnText: {color: '#FFFFFF', fontSize: 15, fontWeight: '600'},
   shade: {position: 'absolute', left: 0, right: 0, bottom: 0, height: 190, flexDirection: 'column'},
   glowWrap: {position: 'absolute', left: 0, right: 0, bottom: 0, height: 60},
   cloud: {width: 140, height: 110},
@@ -1072,3 +1224,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(124,92,255,0.35)',
   },
 });
+
+// Used by the background AI conversations (texts and calls).
+export function setS(v: AssistSettingsT) {
+  S = v;
+}
+export {beginSession, complete, ensureModel, loadWhisper, offloadModel, unloadWhisper};

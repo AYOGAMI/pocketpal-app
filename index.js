@@ -24,3 +24,4 @@ import PocketPalAssistRoot from './src/assistant/AssistRoot';
 PocketPalAssistRegistry.registerComponent('PocketPalAssist', () => PocketPalAssistRoot);
 import PocketPalAssistSettingsRoot from './src/assistant/AssistSettings';
 PocketPalAssistRegistry.registerComponent('PocketPalAssistSettings', () => PocketPalAssistSettingsRoot);
+import './src/assistant/agents';
