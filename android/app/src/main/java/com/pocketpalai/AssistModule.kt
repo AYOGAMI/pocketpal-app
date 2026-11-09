@@ -13,12 +13,14 @@ import android.telephony.SmsManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.BatteryManager
+import android.os.Bundle
 import android.os.Build
 import android.provider.AlarmClock
 import android.provider.ContactsContract
@@ -191,6 +193,7 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
     private var ttsStarting = false
     private val waiting = ArrayList<(TextToSpeech?) -> Unit>()
     private val pending = ConcurrentHashMap<String, Promise>()
+    private val synthDone = ConcurrentHashMap<String, (Boolean) -> Unit>()
 
     private fun withTts(done: (TextToSpeech?) -> Unit) {
         val cur = tts
@@ -217,11 +220,17 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                 t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {}
                     override fun onDone(utteranceId: String?) {
-                        if (utteranceId != null) pending.remove(utteranceId)?.resolve(true)
+                        if (utteranceId != null) {
+                            pending.remove(utteranceId)?.resolve(true)
+                            synthDone.remove(utteranceId)?.invoke(true)
+                        }
                     }
                     @Deprecated("Deprecated in Java")
                     override fun onError(utteranceId: String?) {
-                        if (utteranceId != null) pending.remove(utteranceId)?.resolve(false)
+                        if (utteranceId != null) {
+                            pending.remove(utteranceId)?.resolve(false)
+                            synthDone.remove(utteranceId)?.invoke(false)
+                        }
                     }
                 })
             }
@@ -251,6 +260,70 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                 pending.remove(id)
                 promise.resolve(false)
             }
+        }
+    }
+
+    // Speaks so the caller can hear it: loudspeaker, full volume, even during a call.
+    @ReactMethod
+    fun speakLoud(text: String, promise: Promise) {
+        withTts { t ->
+            if (t == null) {
+                promise.resolve(false)
+                return@withTts
+            }
+            Thread {
+                var finished = false
+                try {
+                    val am = rc.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    am.setStreamVolume(AudioManager.STREAM_MUSIC, am.getStreamMaxVolume(AudioManager.STREAM_MUSIC), 0)
+                    val file = java.io.File(rc.cacheDir, "assist_loud.wav")
+                    if (file.exists()) file.delete()
+                    val id = "s" + System.nanoTime()
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    var ok = false
+                    synthDone[id] = { good -> ok = good; latch.countDown() }
+                    val r = t.synthesizeToFile(text, null, file, id)
+                    if (r != TextToSpeech.SUCCESS) {
+                        synthDone.remove(id)
+                        promise.resolve(false)
+                        finished = true
+                        return@Thread
+                    }
+                    latch.await(20, java.util.concurrent.TimeUnit.SECONDS)
+                    if (!ok || !file.exists()) {
+                        promise.resolve(false)
+                        finished = true
+                        return@Thread
+                    }
+                    var spk: AudioDeviceInfo? = null
+                    for (d in am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                        if (d.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                            spk = d
+                            break
+                        }
+                    }
+                    val mp = android.media.MediaPlayer()
+                    mp.setAudioAttributes(
+                        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+                    )
+                    mp.setDataSource(file.absolutePath)
+                    if (spk != null && Build.VERSION.SDK_INT >= 28) mp.setPreferredDevice(spk)
+                    mp.setVolume(1f, 1f)
+                    val done = java.util.concurrent.CountDownLatch(1)
+                    mp.setOnCompletionListener { done.countDown() }
+                    mp.setOnErrorListener { _, _, _ -> done.countDown(); true }
+                    mp.prepare()
+                    mp.start()
+                    done.await(60, java.util.concurrent.TimeUnit.SECONDS)
+                    try { mp.release() } catch (e: Exception) {}
+                    promise.resolve(true)
+                    finished = true
+                } catch (e: Exception) {
+                    HelperLog.add(rc, "Loud speech failed: " + e.message)
+                    if (!finished) promise.resolve(false)
+                }
+            }.start()
         }
     }
 
@@ -548,6 +621,14 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
                 try {
                     val am = rc.getSystemService(Context.AUDIO_SERVICE) as AudioManager
                     am.isSpeakerphoneOn = true
+                    if (Build.VERSION.SDK_INT >= 31) {
+                        for (d in am.availableCommunicationDevices) {
+                            if (d.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                                am.setCommunicationDevice(d)
+                                break
+                            }
+                        }
+                    }
                     HelperLog.add(rc, "Call answered, speakerphone on")
                 } catch (e: Exception) {
                     HelperLog.add(rc, "Speakerphone failed: " + e.message)
@@ -610,6 +691,45 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
         val k = threadKey(number)
         rc.getSharedPreferences("assist_calls", Context.MODE_PRIVATE).edit().remove("t_$k").remove("p_$k").remove("n_$k").apply()
         promise.resolve(true)
+    }
+
+    // answers an RCS or WhatsApp message through the notification's reply button
+    @ReactMethod
+    fun sendChatReply(key: String, text: String, promise: Promise) {
+        try {
+            val action = ReplyStore.actions[key]
+            if (action == null) {
+                HelperLog.add(rc, "No reply button is available for that chat")
+                promise.resolve(false)
+                return
+            }
+            val ris = action.remoteInputs
+            val intent = Intent()
+            val bundle = Bundle()
+            for (ri in ris) bundle.putCharSequence(ri.resultKey, text)
+            android.app.RemoteInput.addResultsToIntent(ris, intent, bundle)
+            action.actionIntent.send(rc, 0, intent)
+            rc.getSharedPreferences("assist_calls", Context.MODE_PRIVATE).edit().putString("l_$key", text).apply()
+            HelperLog.add(rc, "Replied in the chat")
+            promise.resolve(true)
+        } catch (e: Exception) {
+            HelperLog.add(rc, "Chat reply failed: " + e.message)
+            promise.resolve(false)
+        }
+    }
+
+    // the phone's own theme colour (Material You), for tinting the glass
+    @ReactMethod
+    fun getAccent(promise: Promise) {
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                val c = rc.resources.getColor(android.R.color.system_accent1_400, null)
+                promise.resolve(String.format("#%06X", 0xFFFFFF and c))
+                return
+            }
+        } catch (e: Exception) {
+        }
+        promise.resolve("")
     }
 
     @ReactMethod
@@ -752,6 +872,8 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
     fun callHelperStatus(promise: Promise) {
         val sb = StringBuilder()
         sb.append("Helper running: ").append(if (CallHelperService.running) "yes" else "no").append("\n")
+        sb.append(if (AssistNotificationService.instance != null) "OK  " else "OFF  ").append("Notification access (needed for RCS and WhatsApp replies)\n")
+        sb.append(if (AssistAccessibilityService.instance != null) "OK  " else "OFF  ").append("Accessibility service (only for AI answering calls)\n")
         val names = linkedMapOf(
             Manifest.permission.READ_PHONE_STATE to "Phone state",
             Manifest.permission.ANSWER_PHONE_CALLS to "Decline calls",

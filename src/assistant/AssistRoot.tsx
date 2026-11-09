@@ -12,7 +12,9 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  UIManager,
   View,
+  requireNativeComponent,
 } from 'react-native';
 
 import {asrStore, modelStore, palStore, ttsStore} from '../store';
@@ -519,6 +521,34 @@ const FIRST_LINES = (txt: string, n: number) =>
     .slice(0, n)
     .join('. ');
 
+// ---------------------------------------------------------------- liquid glass
+// A native lens that bends and softly blurs the app behind it. If it is missing, plain tinted glass is used.
+let GlassNative: any = null;
+try {
+  const um: any = UIManager;
+  if (!um.hasViewManagerConfig || um.hasViewManagerConfig('PocketGlass')) {
+    GlassNative = requireNativeComponent('PocketGlass');
+  }
+} catch (_e) {
+  GlassNative = null;
+}
+
+class GlassBoundary extends React.Component<{children?: React.ReactNode}, {bad: boolean}> {
+  state = {bad: false};
+  static getDerivedStateFromError() {
+    return {bad: true};
+  }
+  render() {
+    return this.state.bad ? null : this.props.children;
+  }
+}
+
+const hexToRgba = (hex: string, a: number) => {
+  const h = hex.replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+};
+
 // ---------------------------------------------------------------- circle to search
 const SCREEN = Dimensions.get('screen');
 type Box = {x: number; y: number; w: number; h: number};
@@ -708,6 +738,8 @@ export default function AssistRoot() {
   const [shade, setShade] = useState(true);
   const [glow, setGlow] = useState(true);
   const [size, setSize] = useState(1);
+  const [glass, setGlass] = useState(true);
+  const [tint, setTint] = useState('rgba(124,92,255,0.22)');
   const amp = useRef(new Animated.Value(0.15)).current;
   const spin = useRef(new Animated.Value(0)).current;
   const alive = useRef(true);
@@ -892,6 +924,17 @@ export default function AssistRoot() {
       setShade(S.showShade);
       setGlow(S.showGlow);
       setSize(S.cloudSize);
+      setGlass(S.glass);
+      if (S.glassTint === 'system') {
+        try {
+          const hex: string = await N.getAccent();
+          if (hex) {
+            setTint(hexToRgba(hex, 0.24));
+          }
+        } catch (_e) {
+          // keep the PocketPal colours
+        }
+      }
       try {
         await (asrStore as any).init();
       } catch (_e) {
@@ -1152,7 +1195,12 @@ export default function AssistRoot() {
       {glow && <BottomGlow amp={amp} />}
       <View style={styles.bottom} pointerEvents="box-none">
         {(!!line || !!reply) && (
-          <View style={styles.pill} pointerEvents="none">
+          <View style={[styles.pill, glass && styles.pillGlass]} pointerEvents="none">
+            {glass && GlassNative && (
+              <GlassBoundary>
+                <GlassNative style={StyleSheet.absoluteFill} tint={tint} radius={22} strength={S.glassRefract} />
+              </GlassBoundary>
+            )}
             {!!line && (
               <Text style={styles.heard} numberOfLines={2}>
                 {line}
@@ -1173,7 +1221,14 @@ export default function AssistRoot() {
             }
           }}>
           <View style={{transform: [{scale: size}]}}>
-            <Cloud amp={amp} spin={spin} />
+            <View style={styles.bubble}>
+              {glass && GlassNative && (
+                <GlassBoundary>
+                  <GlassNative style={StyleSheet.absoluteFill} tint={tint} radius={80} strength={S.glassRefract + 6} />
+                </GlassBoundary>
+              )}
+              <Cloud amp={amp} spin={spin} />
+            </View>
           </View>
         </Pressable>
       </View>
@@ -1198,6 +1253,18 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     marginBottom: 6,
     maxWidth: '88%',
+    overflow: 'hidden',
+  },
+  bubble: {width: 160, height: 160, borderRadius: 80, alignItems: 'center', justifyContent: 'center', overflow: 'hidden'},
+  pillGlass: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.38)',
+    borderTopColor: 'rgba(255,255,255,0.65)',
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 18,
+    elevation: 6,
   },
   heard: {color: '#FFFFFF', fontSize: 16, fontWeight: '600', textAlign: 'center'},
   reply: {color: '#D8DAE0', fontSize: 14, marginTop: 6, textAlign: 'center', lineHeight: 20},

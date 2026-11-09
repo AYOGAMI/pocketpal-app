@@ -10,5 +10,5 @@ class AssistPackage : ReactPackage {
         listOf(AssistModule(reactContext))
 
     override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> =
-        emptyList()
+        listOf<ViewManager<*, *>>(GlassViewManager())
 }

@@ -146,6 +146,24 @@ export default function AssistSettings() {
       </Row>
 
       <Section title="Look" />
+      <Row title="Frosted glass look" hint="Blurs the app behind the assistant and gives the caption a glass edge. Needs Android 12 or newer.">
+        <Switch value={s.glass} onValueChange={v => set({glass: v})} />
+      </Row>
+      {s.glass && (
+        <Row title="Glass colour" hint="PocketPal colours, or the colours of your phone's theme.">
+          <Chips options={[['PocketPal', 'app'], ['Phone theme', 'system']]} value={s.glassTint} onPick={v => set({glassTint: v})} />
+        </Row>
+      )}
+      {s.glass && (
+        <Row title="Glass bending" hint="How much the glass bends the app behind it. Needs Android 13 and the use screenshot setting.">
+          <Chips options={[['Subtle', 8], ['Normal', 14], ['Strong', 24]]} value={s.glassRefract} onPick={v => set({glassRefract: v})} />
+        </Row>
+      )}
+      {s.glass && (
+        <Row title="Glass blur strength">
+          <Chips options={[['Light', 12], ['Medium', 25], ['Strong', 45]]} value={s.glassBlur} onPick={v => set({glassBlur: v})} />
+        </Row>
+      )}
       <Row title="Dark shade at the bottom">
         <Switch value={s.showShade} onValueChange={v => set({showShade: v})} />
       </Row>
@@ -242,7 +260,7 @@ export default function AssistSettings() {
           </Row>
         </>
       )}
-      <Row title="AI keeps texting the caller" hint="When a caller texts back, the AI replies, asks for missing details, and saves a short note when it has them.">
+      <Row title="AI keeps texting the caller" hint="When a caller texts back, the AI replies, asks for missing details, and saves a short note. It also answers RCS and WhatsApp chats through the notification's Reply button, so turn on notification access.">
         <Switch value={s.smsAgent} onValueChange={v => set({smsAgent: v})} />
       </Row>
       {s.smsAgent && (

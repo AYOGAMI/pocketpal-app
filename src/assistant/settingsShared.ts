@@ -41,6 +41,10 @@ export type AssistSettingsT = {
   circleOnOpen: boolean;
   circleTarget: 'ask' | 'lens' | 'chooser' | 'save';
   circlePackage: string;
+  glass: boolean; // frosted-glass look
+  glassBlur: number;
+  glassTint: 'app' | 'system'; // glass colour: PocketPal colours or the phone's theme
+  glassRefract: number; // how much the glass bends what is behind it
 };
 
 export const DEFAULTS: AssistSettingsT = {
@@ -75,6 +79,10 @@ export const DEFAULTS: AssistSettingsT = {
   circleOnOpen: false,
   circleTarget: 'ask',
   circlePackage: '',
+  glass: true,
+  glassBlur: 25,
+  glassTint: 'app',
+  glassRefract: 14,
 };
 
 const N: any = (NativeModules as any).AssistNative;

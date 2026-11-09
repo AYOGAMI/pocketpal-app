@@ -22,6 +22,7 @@ class SmsReceiver : BroadcastReceiver() {
                 val t = prefs.getLong("p_$key", 0L)
                 if (t == 0L || System.currentTimeMillis() - t > 3 * 60 * 60 * 1000L) continue
                 HelperLog.add(context, "Text received from $addr")
+                prefs.edit().putLong("s_$key", System.currentTimeMillis()).apply()
                 val who = prefs.getString("n_$key", addr) ?: addr
                 val text = body.toString().trim().replace(Regex("\\s+"), " ").take(400)
                 if (AssistSettings.bool(context, "smsAgent", true)) {

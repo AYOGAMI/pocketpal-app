@@ -38,6 +38,8 @@ async function smsAgent(data: any) {
   const number = String(data?.number ?? '');
   const who = String(data?.who ?? number);
   const text = String(data?.text ?? '').trim();
+  const channel = String(data?.channel ?? 'sms');
+  const threadId = String(data?.key ?? '') || number.replace(/\D/g, '').slice(-9) || number;
   try {
     const S = await loadSettings();
     setS(S);
@@ -45,7 +47,7 @@ async function smsAgent(data: any) {
     log('Caller wrote: ' + text.slice(0, 80));
     let thread: ThreadT = {msgs: [], replies: 0};
     try {
-      const raw = await N.getSmsThread(number);
+      const raw = await N.getSmsThread(threadId);
       if (raw) {
         thread = JSON.parse(raw);
       }
@@ -59,7 +61,7 @@ async function smsAgent(data: any) {
       const line = 'Reason from ' + who + ': ' + text;
       await N.addNote(line);
       await N.postNotice('Why they called', line);
-      await N.clearSmsThread(number);
+      await N.clearSmsThread(threadId);
       log('No model could be loaded, saved the caller text as it was');
       return;
     }
@@ -81,7 +83,16 @@ async function smsAgent(data: any) {
     if (done && !/thank/i.test(reply)) {
       reply = (reply + ' Thank you, I will pass this on.').slice(0, 320);
     }
-    await N.sendSms(number, reply);
+    let sent = false;
+    if (channel === 'chat') {
+      sent = await N.sendChatReply(threadId, reply);
+      if (!sent && number) {
+        log('Chat reply button not available, sending a text instead');
+      }
+    }
+    if (!sent && number) {
+      await N.sendSms(number, reply);
+    }
     thread.msgs.push({from: 'me', text: reply});
     thread.replies += 1;
     if (done) {
@@ -90,10 +101,10 @@ async function smsAgent(data: any) {
       const note = 'Follow-up from ' + who + ': ' + summary;
       await N.addNote(note);
       await N.postNotice('Why they called', note);
-      await N.clearSmsThread(number);
+      await N.clearSmsThread(threadId);
       log('Conversation finished and saved to notes');
     } else {
-      await N.saveSmsThread(number, JSON.stringify(thread));
+      await N.saveSmsThread(threadId, JSON.stringify(thread));
       log('Asked a follow-up question');
     }
   } catch (e: any) {
@@ -136,7 +147,7 @@ async function callAgent(data: any) {
       await N.addNote('Missed call from ' + who + '. The AI could not answer it.');
       return;
     }
-    await N.speak(S.callGreeting);
+    await N.speakLoud(S.callGreeting);
     const lines: string[] = [];
     const turns = Math.max(1, S.callTurns);
     for (let turn = 0; turn < turns; turn++) {
@@ -164,7 +175,7 @@ async function callAgent(data: any) {
         reply = (await complete(msgs, 60)) || reply;
       }
       lines.push('Assistant: ' + reply);
-      await N.speak(reply);
+      await N.speakLoud(reply);
     }
     const transcript = lines.join('\n');
     const note = transcript
