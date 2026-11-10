@@ -21,6 +21,12 @@ class GlassViewManager : SimpleViewManager<GlassView>() {
         view.invalidate()
     }
 
+    @ReactProp(name = "tracking", defaultBoolean = false)
+    fun setTracking(view: GlassView, tracking: Boolean) {
+        view.tracking = tracking
+        view.invalidate()
+    }
+
     @ReactProp(name = "strength", defaultFloat = 14f)
     fun setStrength(view: GlassView, strength: Float) {
         view.strengthDp = strength

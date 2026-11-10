@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {
   Animated,
   AppState,
+  DeviceEventEmitter,
   BackHandler,
   Dimensions,
   Easing,
@@ -311,7 +312,10 @@ function ruleIntent(raw: string): any | null {
   if (/(notification|notifications|notifs)/.test(t) && /(read|check|summari|what|any|show|tell)/.test(t)) {
     return {a: 'notifs'};
   }
-  if ((/(screen|page)/.test(t) && /(read|summari|what s on|what is on|tell me what|explain)/.test(t)) || /^(summari[sz]e|read|explain) (this|it)$/.test(t)) {
+  if (/(view|look at|see|describe|what s on|what is on|tell me what s on|show me what s on) (my |the )?(screen|display)/.test(t)) {
+    return {a: 'vision'};
+  }
+  if ((/(screen|page)/.test(t) && /(read|summari|explain)/.test(t)) || /^(summari[sz]e|read|explain) (this|it)$/.test(t)) {
     return {a: 'screen'};
   }
   if (/^(?:read|show|what are)(?: me)?(?: all)? my notes$/.test(t)) {
@@ -521,6 +525,106 @@ const FIRST_LINES = (txt: string, n: number) =>
     .slice(0, n)
     .join('. ');
 
+async function readScreenText(): Promise<string> {
+  const txt = String((await N.getScreenText()) ?? '').trim();
+  if (!txt) {
+    return 'I could not see any text on the screen. In the default assistant settings, turn on use text from screen.';
+  }
+  if (txt.length < 350) {
+    return txt.replace(/\n+/g, '. ');
+  }
+  return summarise('screen', txt);
+}
+
+// A model that can see pictures. Uses the one chosen in settings, else the first downloaded one that can see.
+async function ensureVisionModel(): Promise<boolean> {
+  const ms: any = modelStore;
+  for (let i = 0; i < 200 && ms.isContextLoading; i++) {
+    await sleep(150);
+  }
+  if (ms.context) {
+    try {
+      if (await ms.context.isMultimodalEnabled?.()) {
+        return true;
+      }
+    } catch (_e) {
+      // not a vision model
+    }
+    if (baselineCtx) {
+      return false; // the app's own model is loaded and cannot see: leave it alone
+    }
+    await offloadModel();
+  }
+  for (let i = 0; i < 40 && !(ms.models && ms.models.length > 0); i++) {
+    await sleep(150);
+  }
+  const canSee = (m: any) => !!(m && (m.supportsMultimodal || m.defaultProjectionModel || m.visionEnabled));
+  const cands: any[] = (ms.models ?? []).filter((m: any) => m.isDownloaded && canSee(m));
+  const chosen = S.visionModelId !== 'auto' ? cands.find(m => m.id === S.visionModelId) : undefined;
+  const model = chosen ?? cands[0];
+  if (!model) {
+    return false;
+  }
+  try {
+    await ms.initContext(model);
+  } finally {
+    if (sessionOver) {
+      await offloadModel();
+    }
+  }
+  try {
+    return !!(await ms.context?.isMultimodalEnabled?.());
+  } catch (_e) {
+    return !!ms.context;
+  }
+}
+
+// Takes the screenshot Android gave the assistant, asks the vision model about it, then deletes the picture.
+async function visionAnswer(question: string): Promise<string> {
+  let path = '';
+  try {
+    path = await N.getScreenshotScaled(900);
+    if (!path) {
+      return '@NOVISION';
+    }
+    await unloadWhisper();
+    if (!(await ensureVisionModel())) {
+      return '@NOVISION';
+    }
+    const ctx: any = (modelStore as any).context;
+    const res = await ctx.completion(
+      {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {type: 'text', text: 'This is a screenshot of my phone. ' + question + ' Answer in two or three short spoken sentences.'},
+              {type: 'image_url', image_url: {url: 'file://' + path}},
+            ],
+          },
+        ],
+        n_predict: 200,
+        temperature: 0.3,
+        stop: ['<|im_end|>', '<|eot_id|>', '</s>', '<end_of_turn>'],
+      },
+      () => {},
+    );
+    const raw = res?.text ?? res?.content ?? '';
+    return String(raw).replace(/<think>[\s\S]*?<\/think>/g, '').trim() || '@NOVISION';
+  } catch (_e) {
+    return '@NOVISION';
+  } finally {
+    try {
+      await N.deleteTempShots();
+    } catch (_x) {
+      // ignore
+    }
+    if (unloadEach()) {
+      await offloadModel();
+    }
+  }
+}
+
 // ---------------------------------------------------------------- liquid glass
 // A native lens that bends and softly blurs the app behind it. If it is missing, plain tinted glass is used.
 let GlassNative: any = null;
@@ -547,6 +651,66 @@ const hexToRgba = (hex: string, a: number) => {
   const h = hex.replace('#', '');
   const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
   return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+};
+
+let InkNative: any = null;
+try {
+  const um2: any = UIManager;
+  if (!um2.hasViewManagerConfig || um2.hasViewManagerConfig('PocketInk')) {
+    InkNative = requireNativeComponent('PocketInk');
+  }
+} catch (_e) {
+  InkNative = null;
+}
+
+// Glass orbs: lenses that bend the app behind them, drifting and pulsing like a liquid.
+const ORBS = [
+  {size: 92, x: -34, y: 8, tint: 'rgba(130,90,255,0.26)', dx: 8, dy: 6, dur: 2600},
+  {size: 100, x: 30, y: 0, tint: 'rgba(70,140,255,0.24)', dx: -9, dy: 7, dur: 3100},
+  {size: 78, x: -2, y: -28, tint: 'rgba(255,120,200,0.24)', dx: 7, dy: -8, dur: 2300},
+  {size: 58, x: -12, y: 36, tint: 'rgba(90,230,235,0.22)', dx: -6, dy: -5, dur: 2900},
+  {size: 52, x: 50, y: 38, tint: 'rgba(255,190,110,0.22)', dx: 5, dy: 6, dur: 3300},
+];
+
+const GlassOrbs: React.FC<{amp: Animated.Value; spin: Animated.Value; strength: number}> = ({amp, spin, strength}) => {
+  const drifts = useRef(ORBS.map(() => new Animated.Value(0))).current;
+  useEffect(() => {
+    const anims = drifts.map((v, i) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(v, {toValue: 1, duration: ORBS[i].dur, easing: Easing.inOut(Easing.sin), useNativeDriver: true}),
+          Animated.timing(v, {toValue: 0, duration: ORBS[i].dur, easing: Easing.inOut(Easing.sin), useNativeDriver: true}),
+        ]),
+      ),
+    );
+    anims.forEach(a => a.start());
+    return () => anims.forEach(a => a.stop());
+  }, [drifts]);
+  return (
+    <Animated.View
+      style={{width: 200, height: 150, transform: [{rotate: spin.interpolate({inputRange: [0, 1], outputRange: ['0deg', '360deg']})}]}}>
+      {ORBS.map((o, i) => (
+        <Animated.View
+          key={i}
+          style={{
+            position: 'absolute',
+            width: o.size,
+            height: o.size,
+            left: 100 + o.x - o.size / 2,
+            top: 75 + o.y - o.size / 2,
+            transform: [
+              {translateX: drifts[i].interpolate({inputRange: [0, 1], outputRange: [-o.dx, o.dx]})},
+              {translateY: drifts[i].interpolate({inputRange: [0, 1], outputRange: [-o.dy, o.dy]})},
+              {scale: amp.interpolate({inputRange: [0, 1], outputRange: [0.9, 1.16 + i * 0.03]})},
+            ],
+          }}>
+          <GlassBoundary>
+            <GlassNative style={StyleSheet.absoluteFill} tint={o.tint} radius={o.size / 2} strength={strength} tracking />
+          </GlassBoundary>
+        </Animated.View>
+      ))}
+    </Animated.View>
+  );
 };
 
 // ---------------------------------------------------------------- circle to search
@@ -734,7 +898,7 @@ export default function AssistRoot() {
   const [heard, setHeard] = useState('');
   const [reply, setReply] = useState('');
   const [hidden, setHidden] = useState(false);
-  const [circleUri, setCircleUri] = useState('');
+  const [cropPath, setCropPath] = useState('');
   const [shade, setShade] = useState(true);
   const [glow, setGlow] = useState(true);
   const [size, setSize] = useState(1);
@@ -784,6 +948,11 @@ export default function AssistRoot() {
     }
     await releaseAll();
     assistActive = false;
+    try {
+      N?.deleteTempShots();
+    } catch (_e) {
+      // ignore
+    }
     N?.close();
   };
 
@@ -823,6 +992,9 @@ export default function AssistRoot() {
       return;
     }
     const emitter = new NativeEventEmitter(N);
+    const inkSub = emitter.addListener('AssistInk', (e: any) => {
+      onInk(e);
+    });
     const sub = emitter.addListener('AssistLevel', (v: number) => {
       if (phaseRef.current === 'listening') {
         Animated.timing(amp, {
@@ -832,7 +1004,10 @@ export default function AssistRoot() {
         }).start();
       }
     });
-    return () => sub.remove();
+    return () => {
+      sub.remove();
+      inkSub.remove();
+    };
   }, [amp]);
 
   useEffect(() => {
@@ -881,35 +1056,38 @@ export default function AssistRoot() {
     }
   };
 
-  const circleFlow = async () => {
-    setPh('thinking');
-    const p: string = await N.getScreenshotPath();
-    if (!p) {
-      await say('I could not get the screen. In the default assistant settings, turn on use screenshot.');
-      await finish();
-      return;
+  const doTarget = async (path: string, target: string) => {
+    acting.current = true;
+    if (target === 'save') {
+      await N.saveImage(path);
+    } else if (target === 'lens') {
+      await N.shareImage(path, 'com.google.android.googlequicksearchbox');
+    } else {
+      await N.shareImage(path, S.circlePackage || '');
     }
-    setCircleUri('file://' + p);
+    setCropPath('');
+    await finish();
   };
 
-  const onCircleResult = async (box: Box | null, target: string) => {
-    setCircleUri('');
-    if (!box) {
-      await finish();
+  // you drew on the screen: a short tap closes, a circle searches what is inside it
+  const onInk = async (e: any) => {
+    if (closing.current) {
       return;
     }
-    acting.current = true;
-    const path: string = await N.cropShot(box.x / SCREEN.width, box.y / SCREEN.height, box.w / SCREEN.width, box.h / SCREEN.height);
-    if (path) {
-      if (target === 'save') {
-        await N.saveImage(path);
-      } else if (target === 'lens') {
-        await N.shareImage(path, 'com.google.android.googlequicksearchbox');
-      } else {
-        await N.shareImage(path, S.circlePackage || '');
-      }
+    if ((e?.moved ?? 0) < 45) {
+      finish();
+      return;
     }
-    await finish();
+    const path: string = await N.cropShot(e.fx, e.fy, e.fw, e.fh);
+    if (!path) {
+      setReply('To search what you circle, turn on "use screenshot" in the default assistant settings.');
+      return;
+    }
+    if (S.circleTarget === 'ask') {
+      setCropPath(path);
+      return;
+    }
+    await doTarget(path, S.circleTarget);
   };
 
   async function run() {
@@ -919,6 +1097,11 @@ export default function AssistRoot() {
         return;
       }
       setPh('starting');
+      try {
+        N.cleanupOld(120000);
+      } catch (_e) {
+        // ignore
+      }
       S = await loadSettings();
       PERSONA = await personaText();
       setShade(S.showShade);
@@ -954,11 +1137,6 @@ export default function AssistRoot() {
       const history: Msg[] = [];
       let first = true;
       let pendingEmail: {to: string} | null = null;
-
-      if (S.circleOnOpen) {
-        await circleFlow();
-        return;
-      }
 
       while (alive.current) {
         setPh('listening');
@@ -999,7 +1177,7 @@ export default function AssistRoot() {
           await finish();
           return;
         }
-        if (act && ['screen', 'notifs', 'note_add', 'notes_read', 'notes_clear', 'unload', 'skill_ai', 'screenshot', 'circle'].includes(act.a)) {
+        if (act && ['screen', 'vision', 'notifs', 'note_add', 'notes_read', 'notes_clear', 'unload', 'skill_ai', 'screenshot', 'circle'].includes(act.a)) {
           const sp = act;
           act = null;
           setPh('thinking');
@@ -1018,9 +1196,8 @@ export default function AssistRoot() {
             return;
           }
           if (sp.a === 'circle') {
-            await releaseAll();
-            await circleFlow();
-            return;
+            await say('Draw a circle with your finger around what you want to search.');
+            continue;
           }
           if (sp.a === 'skill_ai') {
             await unloadWhisper();
@@ -1054,14 +1231,13 @@ export default function AssistRoot() {
             const nt = String((await N.getNotes()) ?? '').trim();
             spoken = nt ? 'Your latest notes. ' + nt.split('\n').filter((l: string) => l.trim()).slice(-6).join('. ') : 'You have no notes.';
           } else if (sp.a === 'screen') {
-            const txt = String((await N.getScreenText()) ?? '').trim();
-            if (!txt) {
-              spoken = 'I could not see any text on the screen. In the default assistant settings, turn on use text from screen.';
-            } else if (txt.length < 350) {
-              spoken = txt.replace(/\n+/g, '. ');
-            } else {
-              spoken = await summarise('screen', txt);
-            }
+            spoken = await readScreenText();
+          } else if (sp.a === 'vision') {
+            const v = S.screenVision ? await visionAnswer(text) : '@NOVISION';
+            spoken =
+              v && v !== '@NOVISION'
+                ? v
+                : (S.screenVision ? 'I could not use a vision model, so I read the text on the screen instead. ' : '') + (await readScreenText());
           } else if (sp.a === 'notifs') {
             const txt = String((await N.getNotifications()) ?? '').trim();
             if (txt === 'NOACCESS') {
@@ -1182,18 +1358,28 @@ export default function AssistRoot() {
     phase === 'starting' ? 'Getting ready...' : phase === 'listening' ? 'Listening...' : phase === 'thinking' ? 'Thinking...' : '';
   const line = heard || hint;
 
-  if (circleUri) {
-    return <CircleLayer uri={circleUri} target={S.circleTarget} onResult={onCircleResult} />;
-  }
   if (hidden) {
     return <View style={styles.root} />;
   }
   return (
     <View style={styles.root}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={finish} />
+      {InkNative ? <InkNative style={StyleSheet.absoluteFill} /> : <Pressable style={StyleSheet.absoluteFill} onPress={finish} />}
       {shade && <BottomShade />}
       {glow && <BottomGlow amp={amp} />}
       <View style={styles.bottom} pointerEvents="box-none">
+        {!!cropPath && (
+          <View style={styles.askRow}>
+            <Pressable style={styles.askBtn} onPress={() => doTarget(cropPath, 'lens')}>
+              <Text style={styles.askText}>Google Lens</Text>
+            </Pressable>
+            <Pressable style={styles.askBtn} onPress={() => doTarget(cropPath, 'chooser')}>
+              <Text style={styles.askText}>Choose app</Text>
+            </Pressable>
+            <Pressable style={styles.askBtn} onPress={() => doTarget(cropPath, 'save')}>
+              <Text style={styles.askText}>Save</Text>
+            </Pressable>
+          </View>
+        )}
         {(!!line || !!reply) && (
           <View style={[styles.pill, glass && styles.pillGlass]} pointerEvents="none">
             {glass && GlassNative && (
@@ -1221,14 +1407,11 @@ export default function AssistRoot() {
             }
           }}>
           <View style={{transform: [{scale: size}]}}>
-            <View style={styles.bubble}>
-              {glass && GlassNative && (
-                <GlassBoundary>
-                  <GlassNative style={StyleSheet.absoluteFill} tint={tint} radius={80} strength={S.glassRefract + 6} />
-                </GlassBoundary>
-              )}
+            {glass && GlassNative ? (
+              <GlassOrbs amp={amp} spin={spin} strength={S.glassRefract + 4} />
+            ) : (
               <Cloud amp={amp} spin={spin} />
-            </View>
+            )}
           </View>
         </Pressable>
       </View>
@@ -1257,15 +1440,11 @@ const styles = StyleSheet.create({
   },
   bubble: {width: 160, height: 160, borderRadius: 80, alignItems: 'center', justifyContent: 'center', overflow: 'hidden'},
   pillGlass: {
-    backgroundColor: 'rgba(255,255,255,0.16)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.38)',
-    borderTopColor: 'rgba(255,255,255,0.65)',
-    shadowColor: '#000',
-    shadowOpacity: 0.25,
-    shadowRadius: 18,
-    elevation: 6,
+    backgroundColor: 'rgba(255,255,255,0.12)',
   },
+  askRow: {flexDirection: 'row', gap: 10, marginBottom: 10},
+  askBtn: {paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.22)'},
+  askText: {color: '#FFFFFF', fontSize: 14, fontWeight: '600'},
   heard: {color: '#FFFFFF', fontSize: 16, fontWeight: '600', textAlign: 'center'},
   reply: {color: '#D8DAE0', fontSize: 14, marginTop: 6, textAlign: 'center', lineHeight: 20},
   circleRoot: {flex: 1, backgroundColor: '#000'},
@@ -1293,6 +1472,17 @@ const styles = StyleSheet.create({
 });
 
 // Used by the background AI conversations (texts and calls).
+DeviceEventEmitter.addListener('AssistClosed', () => {
+  sessionOver = true;
+  Promise.all([guard(unloadWhisper(), 6000), guard(offloadModel(), 30000), guard(unloadVoice(), 6000)]).then(() => {
+    try {
+      N?.deleteTempShots();
+    } catch (_e) {
+      // ignore
+    }
+  });
+});
+
 export function setS(v: AssistSettingsT) {
   S = v;
 }

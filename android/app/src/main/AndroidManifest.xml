@@ -193,6 +193,15 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/assist_accessibility" />
         </service>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.assistfiles"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/assist_file_paths" />
+        </provider>
     </application>
 
 </manifest>

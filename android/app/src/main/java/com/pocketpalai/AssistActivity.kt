@@ -5,6 +5,8 @@ import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import com.facebook.react.ReactActivity
+import com.facebook.react.ReactApplication
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
 import com.facebook.react.defaults.DefaultReactActivityDelegate
@@ -29,5 +31,15 @@ class AssistActivity : ReactActivity() {
             }
         } catch (e: Exception) {
         }
+    }
+
+    // Whatever way the panel closes, tell the app so it unloads every model.
+    override fun onDestroy() {
+        try {
+            val host = (application as ReactApplication).reactHost
+            host?.currentReactContext?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)?.emit("AssistClosed", null)
+        } catch (e: Exception) {
+        }
+        super.onDestroy()
     }
 }

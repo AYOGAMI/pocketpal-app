@@ -45,6 +45,8 @@ export type AssistSettingsT = {
   glassBlur: number;
   glassTint: 'app' | 'system'; // glass colour: PocketPal colours or the phone's theme
   glassRefract: number; // how much the glass bends what is behind it
+  screenVision: boolean; // "view my screen" uses a vision model
+  visionModelId: string; // 'auto' = first downloaded model that can see
 };
 
 export const DEFAULTS: AssistSettingsT = {
@@ -77,12 +79,14 @@ export const DEFAULTS: AssistSettingsT = {
   smsMaxReplies: 3,
   smsDetails: "their name, why they called, how urgent it is, and the best number to call back",
   circleOnOpen: false,
-  circleTarget: 'ask',
+  circleTarget: 'lens',
   circlePackage: '',
   glass: true,
   glassBlur: 25,
   glassTint: 'app',
   glassRefract: 14,
+  screenVision: true,
+  visionModelId: 'auto',
 };
 
 const N: any = (NativeModules as any).AssistNative;

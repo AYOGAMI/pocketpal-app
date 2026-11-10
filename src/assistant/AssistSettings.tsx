@@ -41,6 +41,7 @@ export default function AssistSettings() {
   const [s, setS] = useState<AssistSettingsT>(DEFAULTS);
   const [models, setModels] = useState<Array<{id: string; name: string}>>([]);
   const [pals, setPals] = useState<Array<{id: string; name: string}>>([]);
+  const [visionModels, setVisionModels] = useState<Array<{id: string; name: string}>>([]);
   const [msg, setMsg] = useState('');
   const [helperOn, setHelperOn] = useState(false);
   const [notes, setNotes] = useState('');
@@ -65,6 +66,11 @@ export default function AssistSettings() {
       N?.accessibilityOn().then(setA11y).catch(() => {});
       const list: any[] = (modelStore as any).models ?? [];
       setModels(list.filter(m => m.isDownloaded).map(m => ({id: m.id, name: m.name ?? m.id})));
+      setVisionModels(
+        list
+          .filter(m => m.isDownloaded && (m.supportsMultimodal || m.defaultProjectionModel || m.visionEnabled))
+          .map(m => ({id: m.id, name: m.name ?? m.id})),
+      );
       const pl: any[] = (palStore as any).pals ?? [];
       setPals(pl.map(p => ({id: p.id, name: p.name ?? p.id})));
     }, 800);
@@ -287,17 +293,24 @@ export default function AssistSettings() {
         <Switch value={s.callNotify} onValueChange={v => set({callNotify: v})} />
       </Row>
 
-      <Section title="Circle to search and screenshots" />
+      <Section title="Circle to search, screenshots and screen vision" />
       <Text style={st.note}>
-        Say "circle to search" or "search this". Your screen appears, you draw a circle, and the picture goes where you choose. Say
-        "take a screenshot" to save the screen. Both need "use screenshot" turned on in Android's default assistant settings.
+        With the assistant open, draw a circle with your finger anywhere on the screen. What you circled is sent where you choose
+        below. A short tap closes the assistant. Say "take a screenshot" to save the screen. Say "view my screen" and a vision model
+        looks at the screen and answers; the picture is deleted straight afterwards. These need "use screenshot" turned on in
+        Android's default assistant settings.
       </Text>
-      <Row title="Open circle to search straight away" hint="Instead of listening, the assistant shows your screen to circle.">
-        <Switch value={s.circleOnOpen} onValueChange={v => set({circleOnOpen: v})} />
-      </Row>
       <Row title="After circling">
         <Chips options={[['Ask me', 'ask'], ['Google Lens', 'lens'], ['Choose app', 'chooser'], ['Save', 'save']]} value={s.circleTarget} onPick={v => set({circleTarget: v})} />
       </Row>
+      <Row title="View my screen with a vision model" hint="Off = it only reads the text on the screen.">
+        <Switch value={s.screenVision} onValueChange={v => set({screenVision: v})} />
+      </Row>
+      {s.screenVision && (
+        <Row title="Vision model" hint="Auto picks your first downloaded model that can see pictures. Download one in PocketPal if the list is empty.">
+          <Chips options={[['Auto', 'auto'], ...visionModels.map(m => [m.name, m.id] as [string, any])]} value={s.visionModelId} onPick={v => set({visionModelId: v})} />
+        </Row>
+      )}
       <Text style={st.hint}>Always send to this app (optional, the app's package name)</Text>
       <TextInput style={st.input1} placeholder="for example com.google.android.googlequicksearchbox" placeholderTextColor="#777" value={s.circlePackage} onChangeText={v => set({circlePackage: v.trim()})} />
       <Row title="Use screenshot setting" hint="Open Android's default assistant settings and turn on use screenshot and use text from screen.">

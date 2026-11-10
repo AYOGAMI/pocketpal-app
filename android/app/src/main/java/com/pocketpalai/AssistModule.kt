@@ -30,6 +30,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
 import androidx.core.app.ActivityCompat
+import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -761,8 +762,66 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
         }.start()
     }
 
+    // a small copy of the screenshot for the vision model (faster, less memory)
+    @ReactMethod
+    fun getScreenshotScaled(maxSide: Int, promise: Promise) {
+        Thread {
+            var waited = 0
+            while (PocketScreen.shot == null && waited < 3000) {
+                Thread.sleep(100)
+                waited += 100
+            }
+            val b = PocketScreen.shot
+            if (b == null) {
+                promise.resolve("")
+                return@Thread
+            }
+            val k = maxSide.toFloat() / maxOf(b.width, b.height)
+            val small = if (k < 1f) Bitmap.createScaledBitmap(b, (b.width * k).toInt(), (b.height * k).toInt(), true) else b
+            promise.resolve(saveBitmap(small, "assist_small.png") ?: "")
+        }.start()
+    }
+
+    // removes the screenshot files so nothing builds up (the circled picture stays a little while for the search app)
+    @ReactMethod
+    fun deleteTempShots(promise: Promise) {
+        try {
+            PocketScreen.shot = null
+            val now = System.currentTimeMillis()
+            for (f in rc.cacheDir.listFiles() ?: emptyArray()) {
+                if (!f.name.startsWith("assist_")) continue
+                if (f.name == "assist_crop.png" && now - f.lastModified() < 120000L) continue
+                f.delete()
+            }
+        } catch (e: Exception) {
+        }
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun cleanupOld(ageMs: Double) {
+        try {
+            val now = System.currentTimeMillis()
+            for (f in rc.cacheDir.listFiles() ?: emptyArray()) {
+                if (f.name.startsWith("assist_") && now - f.lastModified() > ageMs) f.delete()
+            }
+        } catch (e: Exception) {
+        }
+    }
+
     @ReactMethod
     fun cropShot(fx: Double, fy: Double, fw: Double, fh: Double, promise: Promise) {
+        Thread {
+            var waited = 0
+            while (PocketScreen.shot == null && waited < 2500) {
+                Thread.sleep(100)
+                waited += 100
+            }
+            cropNow(fx, fy, fw, fh, promise)
+        }.start()
+    }
+
+    private fun cropNow(fx: Double, fy: Double, fw: Double, fh: Double, promise: Promise) {
         try {
             val b = PocketScreen.shot
             if (b == null) {
@@ -799,27 +858,30 @@ class AssistModule(private val rc: ReactApplicationContext) : ReactContextBaseJa
         promise.resolve(toGallery(path, "pocketpal-" + System.currentTimeMillis() + ".png") != null)
     }
 
-    // sends the picture to Google Lens (or any app you choose)
+    // sends the picture to Google Lens (or any app you choose) without leaving a copy in your gallery
     @ReactMethod
     fun shareImage(path: String, pkg: String, promise: Promise) {
-        val u = toGallery(path, "pocketpal-" + System.currentTimeMillis() + ".png")
-        if (u == null) {
-            promise.resolve(false)
-            return
-        }
-        val i = Intent(Intent.ACTION_SEND)
-        i.type = "image/png"
-        i.putExtra(Intent.EXTRA_STREAM, u)
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        if (pkg.isNotBlank()) {
-            i.setPackage(pkg)
-            if (start(i)) {
-                promise.resolve(true)
-                return
+        try {
+            val uri = FileProvider.getUriForFile(rc, rc.packageName + ".assistfiles", java.io.File(path))
+            val i = Intent(Intent.ACTION_SEND)
+            i.type = "image/png"
+            i.putExtra(Intent.EXTRA_STREAM, uri)
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (pkg.isNotBlank()) {
+                i.setPackage(pkg)
+                if (start(i)) {
+                    promise.resolve(true)
+                    return
+                }
+                i.setPackage(null)
             }
-            i.setPackage(null)
+            val chooser = Intent.createChooser(i, "Search or share with")
+            chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            promise.resolve(start(chooser))
+        } catch (e: Exception) {
+            HelperLog.add(rc, "Share failed: " + e.message)
+            promise.resolve(false)
         }
-        promise.resolve(start(Intent.createChooser(i, "Search or share with")))
     }
 
     @ReactMethod
